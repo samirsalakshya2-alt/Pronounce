@@ -44,3 +44,11 @@ scratch_audio/
 # Environment variables
 .env
 .env.local
+
+# Personal benchmark voice data (kept locally, never committed).
+# Regenerate WAVs with scripts/prepare_benchmark_audio.py.
+data/New Recording *.m4a
+data/benchmark_wav/
+data/benchmark_manifest.csv
+data/test_recording.wav
+data/test_recording_original.wav
