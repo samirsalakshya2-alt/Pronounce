@@ -1,0 +1,26 @@
+[project]
+name = "pronunciation-lab"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "ctc-forced-aligner>=1.0.2",
+    "huggingface-hub<0.30",
+    "numpy>=2.5.3",
+    "openpronounce>=0.3.0",
+    "phonemizer>=3.4.0",
+    "scipy>=1.18.1",
+    "silero-vad>=6.2.3",
+    "sounddevice>=0.5.6",
+    "soundfile>=0.14.0",
+    "tokenizers>=0.19.0",
+    "torch>=2.14.1",
+    "torchaudio>=2.11.0",
+    "transformers>=4.44.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]

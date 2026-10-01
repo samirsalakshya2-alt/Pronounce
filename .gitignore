@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# uv
+.python-version
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# PyTorch / ML models (large files, downloaded at runtime)
+*.pt
+*.bin
+*.onnx
+*.safetensors
+
+# Audio files generated during testing (keep originals in audio vault)
+scratch_audio/
+*.ses
+:memory:*
+
+# Pronunciation Lab data directory (user data, not committed)
+# The actual data lives at ~/.pronunciation_lab/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Environment variables
+.env
+.env.local
