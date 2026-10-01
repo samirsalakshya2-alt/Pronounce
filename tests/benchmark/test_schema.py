@@ -101,7 +101,7 @@ def test_schema_creation():
         ],
     )
 
-    assert result.schema_version == "0.1"
+    assert result.schema_version == "0.2"
     assert result.recording.id == "R001"
     assert result.engine.name == "test-engine"
     assert result.processing.wall_time_ms == 1200

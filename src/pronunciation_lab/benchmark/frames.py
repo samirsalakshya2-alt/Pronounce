@@ -18,6 +18,11 @@ from typing import Literal
 # Product of the Wav2Vec2 conv feature-extractor strides.
 WAV2VEC2_STRIDE_SAMPLES = 320
 
+# Receptive field of one output frame (kernels 10,3,3,3,3,2,2 with the strides
+# above): 400 samples, 25 ms at 16 kHz. Shorter input cannot produce a frame and
+# makes the convolutional front end raise inside torch.
+WAV2VEC2_RECEPTIVE_FIELD_SAMPLES = 400
+
 # How far the frame count predicted from the stride may sit from the frame count
 # the model actually returned. The receptive field costs a frame or so at the
 # edges, so a small difference is expected; a large one means the stride

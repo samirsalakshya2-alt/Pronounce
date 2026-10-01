@@ -36,6 +36,9 @@ class EngineInfo(BaseModel):
     version: str | None = None
     mode: Literal["local", "cloud"]
 
+    # Model checkpoint / provider API identity, where the engine has one.
+    model: str | None = None
+
 
 # ============================================================
 # Processing / benchmark timing
@@ -57,6 +60,23 @@ class ProcessingInfo(BaseModel):
         "provider_reported",
         "unknown",
     ] = "monotonic_clock"
+
+    # Where local inference ran ("cpu", "mps", ...). None for cloud engines.
+    device: str | None = None
+
+    # Named sub-stages measured inside the totals above (e.g. {"g2p": 58.8}).
+    # Wall-clock measurements, so they vary run to run; never evidence.
+    stages_ms: dict[str, float] | None = None
+
+    # Cloud engines only. A cloud call's wall time includes the network and the
+    # provider's queue, so it is not comparable with local `inference_ms`:
+    #   api_latency_ms         -- request sent to response received, our clock
+    #   provider_processing_ms -- what the provider says it spent, if it says
+    #   network_ms             -- api_latency_ms - provider_processing_ms, only
+    #                             when both are known; never estimated otherwise
+    api_latency_ms: float | None = None
+    provider_processing_ms: float | None = None
+    network_ms: float | None = None
 
 
 # ============================================================
@@ -88,7 +108,12 @@ class ExpectedPhoneme(BaseModel):
     position: int | None = None
     syllable: int | None = None
 
+    # Expected (lexical) stress of this phone, e.g. "primary" / "secondary".
+    # This is what the dictionary says should happen, never what was heard.
     stress: str | None = None
+
+    # Where the expected phone came from (e.g. "espeak", "provider").
+    source: str | None = None
 
 
 # ============================================================
@@ -114,6 +139,10 @@ class ObservedPhoneme(BaseModel):
 # ============================================================
 
 class AcousticEvidence(BaseModel):
+    # Which waveform was measured: "analysis" is the 16 kHz mono signal the
+    # engine saw, not the original recording.
+    measured_on: Literal["analysis", "original"] | None = None
+
     energy_db: float | None = None
     relative_energy: float | None = None
 
@@ -176,8 +205,13 @@ class WordResult(BaseModel):
 # ============================================================
 
 class ProcessingError(BaseModel):
+    # Machine-readable code; see `pronunciation_lab.benchmark.base.ErrorType`.
     type: str
     message: str
+
+    # Which step failed ("credentials", "model_load", "request", "mapping", ...).
+    stage: str | None = None
+    retryable: bool | None = None
 
 
 # ============================================================
@@ -185,13 +219,24 @@ class ProcessingError(BaseModel):
 # ============================================================
 
 class PronunciationResult(BaseModel):
-    schema_version: str = "0.1"
+    schema_version: str = "0.2"
+
+    # ok      -- evidence produced
+    # partial -- evidence produced, but something expected is missing (see errors)
+    # failed  -- the engine ran and broke; no evidence
+    # blocked -- the engine could not run at all (credentials, model, service)
+    status: Literal["ok", "partial", "failed", "blocked"] = "ok"
 
     recording: RecordingInfo
 
     engine: EngineInfo
 
     processing: ProcessingInfo
+
+    # Phone inventory the expected/observed phones are written in. Engines do
+    # not share one (normalized IPA, raw espeak IPA, ARPAbet, provider sets), so
+    # cross-engine comparison must map through this rather than assume equality.
+    phone_set: str | None = None
 
     words: list[WordResult] = Field(default_factory=list)
 
