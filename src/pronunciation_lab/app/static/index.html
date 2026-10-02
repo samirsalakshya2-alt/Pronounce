@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pronunciation Lab</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <h1>Pronunciation Lab</h1>
+  <p class="tagline">What sound am I actually producing, where exactly did it happen, and can I hear that exact part of my recording?</p>
+</header>
+
+<main>
+  <!-- 1. Input ---------------------------------------------------------- -->
+  <section id="input-panel" class="panel">
+    <h2>1. Your recording</h2>
+    <div class="tabs" role="tablist">
+      <button type="button" role="tab" data-tab="record" class="tab active">Record</button>
+      <button type="button" role="tab" data-tab="upload" class="tab">Upload a file</button>
+      <button type="button" role="tab" data-tab="benchmark" class="tab" id="benchmark-tab" hidden>Benchmark recording</button>
+    </div>
+
+    <div class="tab-body" data-body="record">
+      <button type="button" id="record-btn">● Start recording</button>
+      <span id="record-timer" class="muted"></span>
+      <p id="record-support" class="muted small"></p>
+      <audio id="record-preview" controls hidden></audio>
+    </div>
+
+    <div class="tab-body" data-body="upload" hidden>
+      <input type="file" id="file-input" accept="audio/*,.wav,.m4a,.mp3,.flac,.ogg,.webm">
+      <p class="muted small">WAV works everywhere; .m4a (iPhone Voice Memos), .mp3, .webm need ffmpeg (<span id="ffmpeg-state">checking…</span>).</p>
+    </div>
+
+    <div class="tab-body" data-body="benchmark" hidden>
+      <select id="benchmark-select"></select>
+      <p class="muted small">Recordings from your local benchmark set. The sentence below is filled in from the manifest.</p>
+    </div>
+  </section>
+
+  <!-- 2. Target text ---------------------------------------------------- -->
+  <section id="text-panel" class="panel">
+    <h2>2. What did you read?</h2>
+    <textarea id="target-text" rows="2" maxlength="300" placeholder="Type the exact sentence you said, e.g. Think about the three things that you want to change."></textarea>
+    <div class="row">
+      <label for="engine-select">Analysis engine</label>
+      <select id="engine-select"></select>
+    </div>
+    <p id="engine-note" class="muted small"></p>
+  </section>
+
+  <!-- 3. Run -------------------------------------------------------------- -->
+  <section id="run-panel" class="panel">
+    <button type="button" id="analyze-btn" class="primary">Analyse pronunciation</button>
+    <span id="run-status" class="muted" role="status" aria-live="polite"></span>
+    <div id="error-box" class="error" role="alert" hidden></div>
+  </section>
+
+  <!-- 4. Results ---------------------------------------------------------- -->
+  <section id="results-panel" class="panel" hidden>
+    <h2>Result <span id="result-source" class="muted small"></span></h2>
+    <div id="result-message" class="notice" hidden></div>
+    <details id="caveats"><summary>How to read this</summary><ul id="caveat-list"></ul></details>
+    <div id="summary" class="summary"></div>
+    <div class="row">
+      <button type="button" id="play-all-btn">▶ Play whole recording</button>
+      <span class="muted small" id="audio-info"></span>
+    </div>
+    <p class="muted small">Click a word to see each sound and to listen to exactly where it was heard.</p>
+    <div id="sentence" class="sentence"></div>
+    <div id="word-detail" hidden></div>
+    <div class="row"><button type="button" id="full-feedback-btn">Full Recording Feedback</button>
+      <span class="muted small">Every word and sound of this recording in one view, with a copyable summary.</span></div>
+    <div id="full-feedback" hidden></div>
+    <details id="heard-details"><summary>Everything the recogniser heard</summary><p id="heard-sequence" class="ipa"></p></details>
+  </section>
+
+  <!-- 5. Session history -------------------------------------------------- -->
+  <section id="history-panel" class="panel">
+    <h2>This session</h2>
+    <ul id="history-list" class="muted"><li>No analyses yet.</li></ul>
+  </section>
+</main>
+
+<footer class="muted small" id="engines-footer"></footer>
+<script src="/static/app.js"></script>
+</body>
+</html>

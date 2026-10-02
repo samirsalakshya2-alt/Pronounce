@@ -54,3 +54,5 @@ data/test_recording.wav
 data/test_recording_original.wav
 # Benchmark results: evidence derived from personal recordings.
 data/benchmark_results/
+# Listening notes (what you heard in your own recordings).
+data/listening_notes/
