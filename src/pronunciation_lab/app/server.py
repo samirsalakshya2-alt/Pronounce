@@ -170,6 +170,11 @@ class Handler(BaseHTTPRequestHandler):
             )
             return self._json(200, analysis.view)
 
+        m = re.fullmatch(r"/api/analyses/([0-9a-f]{32})/compare", url.path)
+        if m:
+            body = {} if self.headers.get("Content-Length") in (None, "0") else self._json_body()
+            return self._json(200, service.compare_engines(m.group(1), body.get("engine")))
+
         if url.path == "/api/notes":
             body = self._json_body()
             note = service.add_note(

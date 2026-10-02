@@ -185,4 +185,51 @@ test("contextText: unknown stress is never 'unstressed'", () => {
   assert.ok(!/unstressed|stress unknown/.test(known_none));
 });
 
+// --- M5 ------------------------------------------------------------------------
+const CANDIDATE = {
+  expected: "t",
+  raw_observation: { engine: "openpronounce", observed: null, expected_posterior: 0.007 },
+  evidence: {
+    temporal_slot: { slot_ms: 80, pause_adjacent: false, comparables: 1 },
+    acoustic: { relative_energy: null, measured_over: "estimated region" },
+  },
+  interpretation: {
+    streams: ["recognition", "temporal_slot"], reasons: ["not decoded"], label: "Ambiguous reduction",
+    candidate_explanations: [{ label: "identical neighbouring sound" }],
+  },
+  evidence_strength: "ambiguous",
+  where: { word: "want", word_position: "final", syllable_position: "coda", previous_phone: "n", next_phone: "t" },
+};
+
+test("slotText: context, never the sound's duration", () => {
+  const t = h.slotText({ slot_ms: 80, pause_adjacent: true, comparables: 3 });
+  assert.equal(t, "contextual slot 80 ms between the neighbouring decoded sounds (not this sound's duration); next to a pause; 3 other occurrences to compare");
+  assert.ok(/unavailable/.test(h.slotText({ slot_ms: null })));
+  assert.ok(!/lasted|duration of \d/.test(t));
+});
+
+test("reductionChain: observation → evidence → interpretation → strength, in order", () => {
+  const lines = h.reductionChain(CANDIDATE);
+  assert.equal(lines.length, 4);
+  assert.ok(lines[0].startsWith("Raw engine observation (openpronounce): expected /t/, not decoded, P(/t/) <1%"));
+  assert.ok(lines[1].startsWith("Evidence (recognition, temporal slot): not decoded; contextual slot 80 ms"));
+  assert.ok(!/relative energy/.test(lines[1]));  // unavailable measurement is not shown as a value
+  assert.equal(lines[2], "Candidate interpretation: Ambiguous reduction — possible explanation: identical neighbouring sound");
+  assert.equal(lines[3], "Evidence strength: ambiguous evidence");
+});
+
+test("agreementText names the engines, never a winner", () => {
+  assert.equal(h.agreementText("only_second", "wav2vec2_raw", "openpronounce"), "Listed only from openpronounce's evidence");
+  assert.equal(h.agreementText("only_first", "wav2vec2_raw", "openpronounce"), "Listed only from wav2vec2_raw's evidence");
+  assert.equal(h.agreementText("same_category", "a", "b"), "Both engines: same interpretation");
+});
+
+test("whereText and strength labels", () => {
+  assert.equal(h.whereText(CANDIDATE), "'want' · word-final · coda (derived) · between /n/ and /t/");
+  assert.deepEqual(Object.keys(h.STRENGTH_LABELS), ["moderate", "low", "ambiguous", "insufficient"]);
+  for (const v of [...Object.values(h.STRENGTH_LABELS), ...Object.values(h.AGREEMENT_LABELS)]) {
+    assert.ok(!/high|wrong|incorrect|score|best|worst/i.test(v), v);
+  }
+});
+
 console.log(`ok ${n} tests`);

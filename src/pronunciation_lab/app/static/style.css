@@ -43,3 +43,8 @@ th, td { text-align: left; padding: 6px; border-top: 1px solid var(--line); vert
 .coach-card { border: 1px solid var(--line); border-radius: 8px; padding: 10px; margin: 8px 0; }
 .coach-group h4 { margin: 16px 0 2px; display: inline; }
 .coach-group > summary { cursor: pointer; margin-top: 12px; }
+.reduction-chain { margin: 6px 0 6px 18px; padding: 0; }
+.reduction-chain li { margin: 3px 0; }
+.reduction-chain .step { font-weight: 600; }
+.compare-table td { vertical-align: top; }
+.engine-note { border-left: 3px solid var(--line); padding-left: 8px; }

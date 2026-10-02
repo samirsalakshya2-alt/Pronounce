@@ -37,6 +37,8 @@ from pronunciation_lab.app.audio_input import (
 )
 from pronunciation_lab.app.coach import build_coach
 from pronunciation_lab.app.diagnosis import build_view
+from pronunciation_lab.app.engine_compare import compare, validate_comparison
+from pronunciation_lab.app.reduction import build_reduction, empty_reduction
 from pronunciation_lab.benchmark.base import PronunciationEngine, safe_analyze
 from pronunciation_lab.benchmark.engines import ENGINES, create_engine
 from pronunciation_lab.benchmark.runner import classify_engine
@@ -115,6 +117,8 @@ class Analysis:
     result_json: str
     source_label: str
     sounds: dict[int, dict[str, Any]] = field(default_factory=dict)
+    # M5: engine id -> id of the analysis of the same audio with that engine
+    linked: dict[str, str] = field(default_factory=dict)
 
 
 def validate_text(text: str | None) -> str:
@@ -282,6 +286,14 @@ class AnalysisService:
         coach_timing = coach.pop("_timing_ms", None)
         view["coach"] = coach
         view["processing"]["coach_ms"] = sum(coach_timing.values()) if coach_timing else 0.0
+        # M5: reduction / connected-speech layer over the M4 observations (M4 output unchanged).
+        if coach["state"] == "ok":
+            reduction = build_reduction(result, coach["observations"])
+        else:
+            reduction = empty_reduction(coach["state"], {"id": result.engine.name, "model": result.engine.model,
+                                                         "phone_set": result.phone_set})
+        view["reduction"] = reduction
+        view["processing"]["reduction_ms"] = reduction.pop("timing_ms")
         if view.get("state") == "no_speech" and is_silent(audio.analysis_path):
             view["message"] = "The recording appears to be silent. Check that the microphone is working."
         view |= {
@@ -309,6 +321,51 @@ class AnalysisService:
         (workdir / "result.json").write_text(analysis.result_json, encoding="utf-8")
         self._remember(analysis)
         return analysis
+
+    # ------------------------------------------------------------------
+    # M5: cross-engine comparison (on demand)
+    # ------------------------------------------------------------------
+
+    COMPARABLE_ENGINES = ("wav2vec2_raw", "openpronounce")
+
+    def compare_engines(self, analysis_id: str, engine_id: str | None = None) -> dict[str, Any]:
+        """Analyse the same audio and text with the other local engine and compare reduction evidence.
+
+        Real inference with the second engine (timed); never reuses or edits the
+        first engine's evidence. The pair is kept so repeated requests do not re-run.
+        """
+        analysis = self.get(analysis_id)
+        if analysis.engine_id not in self.COMPARABLE_ENGINES:
+            raise UserError("compare_unsupported", "Engine comparison needs a local engine analysis.")
+        other_id = engine_id or next(e for e in self.COMPARABLE_ENGINES if e != analysis.engine_id)
+        if other_id == analysis.engine_id or other_id not in self.COMPARABLE_ENGINES:
+            raise UserError("compare_unsupported", "Choose the other local engine to compare with.")
+        if analysis.view.get("reduction", {}).get("state") != "ok":
+            raise UserError("compare_unsupported", "This analysis has no evidence to compare.")
+        linked = self._analyses.get(analysis.linked.get(other_id, ""))
+        if linked is None:
+            eid, engine = self._engine(other_id)
+            data = analysis.audio.original_path.read_bytes()
+            linked = self._run(data, analysis.audio.original_name, analysis.target_text, eid, engine,
+                               source_label=f"{analysis.source_label} — compared with {eid}")
+            analysis.linked[eid] = linked.id
+            linked.linked[analysis.engine_id] = analysis.id
+        if linked.view.get("reduction", {}).get("state") != "ok":
+            raise UserError("compare_unsupported", f"{other_id} produced no evidence for this recording.", 409)
+
+        pair = sorted((analysis, linked), key=lambda a: self.COMPARABLE_ENGINES.index(a.engine_id))
+        sides = [{"engine": a.engine_id, "observations": a.view["coach"]["observations"],
+                  "reduction": a.view["reduction"], "text": a.target_text,
+                  "duration_ms": a.view["duration_ms"]} for a in pair]
+        result = compare(*sides)
+        issues = validate_comparison(result, *sides)
+        result |= {
+            "analysis_ids": {a.engine_id: a.id for a in pair},
+            "reductions": {a.engine_id: a.view["reduction"] for a in pair},
+            "processing": {a.engine_id: a.view["processing"] for a in pair},
+            "integrity": {"ok": not issues, "issues": issues},
+        }
+        return result
 
     def _remember(self, analysis: Analysis) -> None:
         self._analyses[analysis.id] = analysis

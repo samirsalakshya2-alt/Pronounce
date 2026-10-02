@@ -218,12 +218,66 @@ function contextText(ctx) {
   return parts.join(" · ");
 }
 
+// --- M5 Reduction & Connected Speech: pure helpers --------------------------------
+const REDUCTION_OPEN_LIMIT = 4;
+const STRENGTH_LABELS = {
+  moderate: "moderate evidence", low: "low evidence", ambiguous: "ambiguous evidence", insufficient: "insufficient evidence",
+};
+const AGREEMENT_LABELS = {
+  same_category: "Both engines: same interpretation",
+  different_category: "The engines' interpretations differ",
+  only_first: "Listed only from {first}'s evidence",
+  only_second: "Listed only from {second}'s evidence",
+};
+
+function agreementText(agreement, first, second) {
+  return (AGREEMENT_LABELS[agreement] || agreement).replace("{first}", first).replace("{second}", second);
+}
+
+/** The contextual temporal slot, always worded as context, never as duration. */
+function slotText(ts) {
+  if (!ts || ts.slot_ms === null || ts.slot_ms === undefined) return "contextual slot unavailable (start or end of the speech)";
+  let s = "contextual slot " + Math.round(ts.slot_ms) + " ms between the neighbouring decoded sounds (not this sound's duration)";
+  if (ts.pause_adjacent) s += "; next to a pause";
+  if (ts.comparables) s += "; " + ts.comparables + " other occurrence" + (ts.comparables > 1 ? "s" : "") + " to compare";
+  return s;
+}
+
+/** raw engine observation → evidence → interpretation → evidence strength, as four lines. */
+function reductionChain(c) {
+  const r = c.raw_observation;
+  const heard = r.observed ? "decoded /" + r.observed + "/" : "not decoded";
+  const p = r.expected_posterior === null || r.expected_posterior === undefined ? "unavailable" : formatProbability(r.expected_posterior);
+  const ev = c.evidence;
+  const parts = c.interpretation.reasons.slice();
+  parts.push(slotText(ev.temporal_slot));
+  if (ev.acoustic.relative_energy !== null && ev.acoustic.relative_energy !== undefined) {
+    parts.push("relative energy " + formatMeasure(ev.acoustic.relative_energy) + " (" + ev.acoustic.measured_over + ")");
+  }
+  const expl = c.interpretation.candidate_explanations.map((e) => e.label).join("; ");
+  return [
+    "Raw engine observation (" + r.engine + "): expected /" + c.expected + "/, " + heard + ", P(/" + c.expected + "/) " + p,
+    "Evidence (" + c.interpretation.streams.join(", ").replace(/_/g, " ") + "): " + parts.join("; "),
+    "Candidate interpretation: " + c.interpretation.label + (expl ? " — possible explanation: " + expl : ""),
+    "Evidence strength: " + (STRENGTH_LABELS[c.evidence_strength] || c.evidence_strength),
+  ];
+}
+
+function whereText(c) {
+  const w = c.where;
+  const parts = ["'" + w.word + "'", "word-" + w.word_position];
+  if (w.syllable_position) parts.push(w.syllable_position.replace("_", " ") + " (derived)");
+  parts.push("between /" + (w.previous_phone || "–") + "/ and /" + (w.next_phone || "–") + "/");
+  return parts.join(" · ");
+}
+
 if (typeof module !== "undefined") {
   module.exports = {
     CATEGORY_TITLES, WORD_TITLES, formatSeconds, formatSpan, formatProbability,
     playbackArgs, analyzeUrl, recordingFilename, engineOptionLabel, summaryChips, extraSoundsText, localTime,
     wordTitle, ALL_WORD_TITLES, fullFeedbackText,
     OBSERVATION_LABELS, PATTERN_CLASS_LABELS, coachPatternTitle, patternClassLabel, formatMeasure, contextText,
+    STRENGTH_LABELS, AGREEMENT_LABELS, agreementText, slotText, reductionChain, whereText,
   };
 }
 
@@ -427,6 +481,8 @@ if (typeof document !== "undefined") {
     $("full-feedback").hidden = true;
     $("coach").hidden = true;
     $("coach").innerHTML = "";
+    $("reduction").hidden = true;
+    $("reduction").innerHTML = "";
     $("full-feedback").innerHTML = "";
     $("sentence").innerHTML = "";
     $("summary").innerHTML = "";
@@ -740,6 +796,118 @@ if (typeof document !== "undefined") {
     box.append(el("p", { class: "muted small", text: "Listen to your own occurrence, then record the word and the sentence again." }));
   }
 
+  // --- M5 Reduction & Connected Speech -------------------------------------------------
+  function showReduction() {
+    const view = state.view;
+    const red = view && view.reduction;
+    const box = $("reduction");
+    box.hidden = false;
+    box.innerHTML = "";
+    box.append(el("h3", { text: "Reduction & Connected Speech" }));
+    if (!red || red.state !== "ok") {
+      box.append(el("p", { text: "No reduction analysis is available for this analysis." }));
+      return;
+    }
+    box.append(el("p", { class: "muted small", text: "Recording: " + (view.source || "") + " · evidence from " + red.engine.id + "." }));
+    const cav = el("details", {}, [el("summary", { text: "How to read this" })]);
+    const ul = el("ul");
+    red.caveats.forEach((c) => ul.append(el("li", { text: c })));
+    cav.append(ul);
+    box.append(cav);
+    if (!red.integrity.ok) box.append(el("p", { class: "error", text: "Integrity check: " + red.integrity.issues.join("; ") }));
+    const rate = red.speaking_rate || {};
+    box.append(el("p", { class: "small", id: "reduction-rate", text: "Speaking rate: " +
+      (rate.phones_per_s_excluding_pauses ? rate.phones_per_s_excluding_pauses.toFixed(1) + " decoded sounds per second between pauses" : "unavailable") +
+      " · pauses ≥ " + red.thresholds.pause_ms + " ms: " + (rate.pauses || 0) }));
+
+    const other = red.engine.id === "openpronounce" ? "wav2vec2_raw" : "openpronounce";
+    const cmpBox = el("div", { id: "reduction-compare" });
+    const cmpBtn = el("button", { type: "button", id: "compare-btn", text: "Compare with " + other, onclick: () => runCompare(cmpBox, cmpBtn) });
+    box.append(el("div", { class: "row" }, [
+      cmpBtn,
+      el("span", { class: "muted small", text: "Runs the other local engine on the same audio. Both share one acoustic model; differences are kept, not resolved." }),
+    ]), cmpBox);
+
+    const byId = Object.fromEntries(red.candidates.map((c) => [c.id, c]));
+    if (!red.groups.length) box.append(el("p", { text: "No reduction or connected-speech candidates in this recording's evidence." }));
+    for (const g of red.groups) {
+      const open = g.id !== "insufficient_evidence" && g.candidate_ids.length <= REDUCTION_OPEN_LIMIT;
+      const section = el("details", { class: "coach-group", "data-reduction-group": g.id },
+        [el("summary", {}, [el("h4", { text: g.title + " (" + g.candidate_ids.length + ")" })])]);
+      section.open = open;
+      for (const id of g.candidate_ids) section.append(reductionCard(byId[id]));
+      box.append(section);
+    }
+    box.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  function reductionCard(c) {
+    const card = el("div", { class: "coach-card", "data-candidate": c.id });
+    const chain = el("ol", { class: "reduction-chain small" });
+    reductionChain(c).forEach((line) => {
+      const [step, ...rest] = line.split(": ");
+      chain.append(el("li", {}, [el("span", { class: "step", text: step + ": " }), el("span", { text: rest.join(": ") })]));
+    });
+    card.append(
+      el("div", { class: "row" }, [
+        el("strong", { class: "ipa", text: c.interpretation.label + " — /" + c.expected + "/ in '" + c.where.word + "'" }),
+        el("span", { class: "chip", text: STRENGTH_LABELS[c.evidence_strength] }),
+      ]),
+      el("p", { text: c.summary }),
+      el("p", { class: "small", text: "Where: " + whereText(c) + " · " + formatSpan(c.where.span_ms, c.where.timing_source !== "engine") }),
+      chain,
+    );
+    for (const e of c.interpretation.candidate_explanations) card.append(el("p", { class: "muted small", text: e.text }));
+    card.append(el("div", { class: "row" }, [
+      el("button", { type: "button", class: "play-candidate", text: "▶ Play exact occurrence", onclick: () => play(c.where.play_ms, card) }),
+      c.where.word_play_ms ? el("button", { type: "button", text: "▶ Play word", onclick: () => play(c.where.word_play_ms, card) }) : el("span"),
+    ]));
+    return card;
+  }
+
+  function sideText(s) {
+    if (!s) return "no matching sound in this engine's inventory";
+    const heard = s.observed ? "decoded /" + s.observed + "/" : "not decoded";
+    const cand = s.candidate ? s.candidate.label + " (" + STRENGTH_LABELS[s.candidate.evidence_strength] + ")" : "not listed";
+    return "/" + s.expected + "/ " + heard + " at " + (s.span_ms ? formatSpan(s.span_ms, s.timing_source !== "engine") : "no timing") + " — " + cand;
+  }
+
+  async function runCompare(box, btn) {
+    btn.disabled = true;
+    box.innerHTML = "";
+    box.append(el("p", { class: "muted small", text: "Analysing the same audio with the other engine…" }));
+    try {
+      const cmp = await api("/api/analyses/" + state.view.analysis_id + "/compare", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+      box.innerHTML = "";
+      box.append(el("p", { class: "muted small engine-note", text: cmp.shared_model_note }));
+      if (!cmp.integrity.ok) box.append(el("p", { class: "error", text: "Integrity check: " + cmp.integrity.issues.join("; ") }));
+      const [a, b] = cmp.engines;
+      if (!cmp.rows.length) { box.append(el("p", { text: "Neither engine lists a candidate." })); return; }
+      const table = el("table", { class: "compare-table" }, [el("tr", {}, [
+        el("th", { text: "Word" }), el("th", { text: a }), el("th", { text: b }), el("th", { text: "How they relate" }), el("th", { text: "Listen" })])]);
+      for (const r of cmp.rows) {
+        const row = el("tr", { "data-agreement": r.agreement });
+        const play_ms = (r.first && r.first.play_ms) || (r.second && r.second.play_ms);
+        row.append(
+          el("td", { text: r.word }),
+          el("td", { class: "small", text: sideText(r.first) }),
+          el("td", { class: "small", text: sideText(r.second) }),
+          el("td", { class: "small" }, [el("span", { text: agreementText(r.agreement, a, b) }),
+            ...r.notes.map((n) => el("span", { class: "hint", text: n.text }))]),
+          el("td", {}, [play_ms ? el("button", { type: "button", class: "play-compare", text: "▶ Play", onclick: () => play(play_ms, row) }) : el("span")]),
+        );
+        table.append(row);
+      }
+      box.append(table);
+    } catch (e) {
+      box.innerHTML = "";
+      box.append(el("p", { class: "error", text: "Comparison failed: " + e.message }));
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
   // --- history -----------------------------------------------------------------------
   async function refreshHistory() {
     const res = await api("/api/analyses");
@@ -763,6 +931,7 @@ if (typeof document !== "undefined") {
   $("play-all-btn").addEventListener("click", () => state.buffer && play([0, state.buffer.duration * 1000], null));
   $("full-feedback-btn").addEventListener("click", showFullFeedback);
   $("coach-btn").addEventListener("click", showCoach);
+  $("reduction-btn").addEventListener("click", showReduction);
   $("record-support").textContent = window.MediaRecorder ? "Recording uses your browser's microphone." : "This browser cannot record; use Upload.";
   loadStatus().then(refreshHistory).catch((e) => showError("Could not reach the app: " + e.message));
 }
