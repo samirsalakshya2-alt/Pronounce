@@ -12,7 +12,7 @@ import subprocess
 import numpy as np
 import pytest
 import soundfile as sf
-from conftest import DATA_DIR
+from apphelpers import DATA_DIR
 
 from pronunciation_lab.app.diagnosis import classify_sound
 

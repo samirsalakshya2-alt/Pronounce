@@ -4,7 +4,7 @@ import json
 
 import pytest
 from benchmark_fakes import FakeEngine, factory
-from conftest import wav_bytes
+from apphelpers import wav_bytes
 
 from pronunciation_lab.app.service import AnalysisService, UserError, validate_text
 

@@ -35,6 +35,7 @@ from pronunciation_lab.app.audio_input import (
     is_silent,
     prepare_audio,
 )
+from pronunciation_lab.app.coach import build_coach
 from pronunciation_lab.app.diagnosis import build_view
 from pronunciation_lab.benchmark.base import PronunciationEngine, safe_analyze
 from pronunciation_lab.benchmark.engines import ENGINES, create_engine
@@ -276,6 +277,11 @@ class AnalysisService:
             self._warm.add(eid)
 
         view = build_view(result)
+        # M4: interpretation of the same evidence (no extra inference).
+        coach = build_coach(result)
+        coach_timing = coach.pop("_timing_ms", None)
+        view["coach"] = coach
+        view["processing"]["coach_ms"] = sum(coach_timing.values()) if coach_timing else 0.0
         if view.get("state") == "no_speech" and is_silent(audio.analysis_path):
             view["message"] = "The recording appears to be silent. Check that the microphone is working."
         view |= {

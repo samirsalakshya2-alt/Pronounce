@@ -12,7 +12,7 @@ import urllib.request
 from pathlib import Path
 
 import pytest
-from conftest import PROJECT_ROOT
+from apphelpers import PROJECT_ROOT
 
 
 def free_port() -> int:

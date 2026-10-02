@@ -40,3 +40,6 @@ th, td { text-align: left; padding: 6px; border-top: 1px solid var(--line); vert
 .notes button { font-size: .8rem; padding: 2px 6px; margin: 2px 2px 0 0; }
 .notes .saved { color: var(--expected); font-size: .8rem; }
 #history-list li { cursor: pointer; } #history-list li:hover { text-decoration: underline; }
+.coach-card { border: 1px solid var(--line); border-radius: 8px; padding: 10px; margin: 8px 0; }
+.coach-group h4 { margin: 16px 0 2px; display: inline; }
+.coach-group > summary { cursor: pointer; margin-top: 12px; }

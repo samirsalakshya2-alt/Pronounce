@@ -152,4 +152,37 @@ test("fullFeedbackText never scores or ranks", () => {
   assert.ok(!/score|grade|rank|wrong|incorrect/i.test(h.fullFeedbackText(sampleView())));
 });
 
+// --- M4 Phoneme Coach helpers ------------------------------------------------------
+test("coachPatternTitle per pattern kind", () => {
+  assert.equal(h.coachPatternTitle({ kind: "contrast", expected: "w", contrast: "v" }), "/w/ ↔ /v/");
+  assert.equal(h.coachPatternTitle({ kind: "detection", expected: "s", contrast: null }), "/s/ — not clearly detected");
+  assert.equal(h.coachPatternTitle({ kind: "insertion", expected: null, contrast: "ɪ" }), "Extra /ɪ/");
+});
+
+test("patternClassLabel never ranks and names the context", () => {
+  assert.equal(h.patternClassLabel({ class: "one_off" }), "Single observation");
+  assert.equal(h.patternClassLabel({ class: "consistent" }), "Recurring pattern in this recording");
+  assert.equal(h.patternClassLabel({ class: "context_specific", context: "final" }), "Context-specific (word-final only)");
+  for (const t of Object.values(h.PATTERN_CLASS_LABELS).concat(Object.values(h.OBSERVATION_LABELS))) {
+    assert.ok(!/score|rank|worst|best|wrong|incorrect|mistake|error|fail/i.test(t), t);
+  }
+});
+
+test("formatMeasure: null is unavailable, zero is a real zero", () => {
+  assert.equal(h.formatMeasure(null), "unavailable");
+  assert.equal(h.formatMeasure(undefined), "unavailable");
+  assert.equal(h.formatMeasure(0), "0.00");
+  assert.equal(h.formatMeasure(118.4, "Hz", 0), "118 Hz");
+});
+
+test("contextText: unknown stress is never 'unstressed'", () => {
+  const base = { word_position: "final", previous_phone: "t", next_phone: null, in_consonant_cluster: true };
+  assert.equal(h.contextText({ ...base, stress: null, stress_known: false }),
+    "word-final · between /t/ and /–/ · in a consonant cluster · stress unknown");
+  assert.equal(h.contextText({ ...base, stress: "primary", stress_known: true, in_consonant_cluster: false }),
+    "word-final · between /t/ and /–/ · primary stress (dictionary)");
+  const known_none = h.contextText({ ...base, stress: null, stress_known: true });
+  assert.ok(!/unstressed|stress unknown/.test(known_none));
+});
+
 console.log(`ok ${n} tests`);

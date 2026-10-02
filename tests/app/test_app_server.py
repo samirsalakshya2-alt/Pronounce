@@ -4,7 +4,7 @@ import json
 import threading
 
 import pytest
-from conftest import wav_bytes
+from apphelpers import wav_bytes
 
 from pronunciation_lab.app import server as server_module
 

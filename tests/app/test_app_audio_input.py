@@ -6,7 +6,7 @@ import subprocess
 import numpy as np
 import pytest
 import soundfile as sf
-from conftest import wav_bytes
+from apphelpers import wav_bytes
 
 from pronunciation_lab.app import audio_input as AI
 

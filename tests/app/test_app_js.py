@@ -5,7 +5,7 @@ import shutil
 import subprocess
 
 import pytest
-from conftest import PROJECT_ROOT
+from apphelpers import PROJECT_ROOT
 
 STATIC = PROJECT_ROOT / "src" / "pronunciation_lab" / "app" / "static"
 needs_node = pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")

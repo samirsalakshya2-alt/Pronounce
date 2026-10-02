@@ -1,35 +1,19 @@
-"""Fixtures for the M3 application tests."""
+"""Fixtures for the M3/M4 application tests."""
 
 import json
 import sys
 import urllib.error
 import urllib.request
-from pathlib import Path
 
-import numpy as np
 import pytest
-import soundfile as sf
+from apphelpers import DATA_DIR, PROJECT_ROOT, wav_bytes  # noqa: F401 - re-exported for older imports
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DATA_DIR = PROJECT_ROOT / "data"
 sys.path.insert(0, str(PROJECT_ROOT / "tests" / "benchmark"))  # reuse the M2 fakes
 
 from benchmark_fakes import FakeEngine, FakeUnavailableEngine, factory  # noqa: E402
 
 from pronunciation_lab.app.server import start_in_thread  # noqa: E402
 from pronunciation_lab.app.service import AnalysisService  # noqa: E402
-
-
-def wav_bytes(seconds: float = 1.0, *, sr: int = 16_000, channels: int = 1, subtype: str = "PCM_16",
-              silent: bool = False, tmp: Path) -> bytes:
-    n = int(sr * seconds)
-    rng = np.random.default_rng(0)
-    audio = np.zeros(n) if silent else rng.uniform(-0.3, 0.3, n)
-    if channels > 1:
-        audio = np.stack([audio] * channels, axis=1)
-    path = tmp / f"tone_{sr}_{channels}_{subtype}_{seconds}.wav"
-    sf.write(path, audio.astype(np.float32), sr, subtype=subtype)
-    return path.read_bytes()
 
 
 @pytest.fixture

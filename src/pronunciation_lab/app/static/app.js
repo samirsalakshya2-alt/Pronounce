@@ -171,11 +171,59 @@ function fullFeedbackText(view) {
   return lines.join("\n");
 }
 
+// --- M4 Phoneme Coach: pure helpers --------------------------------------------
+const COACH_OPEN_LIMIT = 4;
+const OBSERVATION_LABELS = {
+  expected: "Consistent with the expected sound",
+  substitution_candidate: "Substitution candidate",
+  omission_candidate: "Not detected (omission candidate)",
+  insertion: "Extra sound",
+  ambiguous: "Ambiguous",
+  weak_evidence: "Weak evidence",
+  not_interpreted: "Not interpreted",
+};
+const PATTERN_CLASS_LABELS = {
+  one_off: "Single observation",
+  repeated: "Repeated in this recording",
+  consistent: "Recurring pattern in this recording",
+  context_specific: "Context-specific",
+};
+
+function coachPatternTitle(p) {
+  if (p.kind === "insertion") return "Extra /" + p.contrast + "/";
+  if (p.kind === "detection") return "/" + p.expected + "/ — not clearly detected";
+  return "/" + p.expected + "/ ↔ /" + p.contrast + "/";
+}
+
+function patternClassLabel(p) {
+  const base = PATTERN_CLASS_LABELS[p.class] || p.class;
+  return p.class === "context_specific" && p.context ? base + " (word-" + p.context + " only)" : base;
+}
+
+/** Acoustic value for display; null/undefined means not measured, never 0. */
+function formatMeasure(value, unit, digits) {
+  if (value === null || value === undefined) return "unavailable";
+  return Number(value).toFixed(digits === undefined ? 2 : digits) + (unit ? " " + unit : "");
+}
+
+function contextText(ctx) {
+  if (!ctx) return "";
+  const parts = ["word-" + ctx.word_position];
+  if (ctx.previous_phone || ctx.next_phone) {
+    parts.push("between /" + (ctx.previous_phone || "–") + "/ and /" + (ctx.next_phone || "–") + "/");
+  }
+  if (ctx.in_consonant_cluster) parts.push("in a consonant cluster");
+  if (ctx.stress_known && ctx.stress) parts.push(ctx.stress + " stress (dictionary)");
+  else if (!ctx.stress_known) parts.push("stress unknown");
+  return parts.join(" · ");
+}
+
 if (typeof module !== "undefined") {
   module.exports = {
     CATEGORY_TITLES, WORD_TITLES, formatSeconds, formatSpan, formatProbability,
     playbackArgs, analyzeUrl, recordingFilename, engineOptionLabel, summaryChips, extraSoundsText, localTime,
     wordTitle, ALL_WORD_TITLES, fullFeedbackText,
+    OBSERVATION_LABELS, PATTERN_CLASS_LABELS, coachPatternTitle, patternClassLabel, formatMeasure, contextText,
   };
 }
 
@@ -377,6 +425,8 @@ if (typeof document !== "undefined") {
     (view.caveats || []).forEach((c) => $("caveat-list").append(el("li", { text: c })));
     $("word-detail").hidden = true;
     $("full-feedback").hidden = true;
+    $("coach").hidden = true;
+    $("coach").innerHTML = "";
     $("full-feedback").innerHTML = "";
     $("sentence").innerHTML = "";
     $("summary").innerHTML = "";
@@ -564,6 +614,132 @@ if (typeof document !== "undefined") {
     }
   }
 
+  // --- M4 Phoneme Coach ------------------------------------------------------------
+  function showCoach() {
+    const view = state.view;
+    const coach = view && view.coach;
+    const box = $("coach");
+    box.hidden = false;
+    box.innerHTML = "";
+    box.append(el("h3", { text: "Phoneme Coach" }));
+    if (!coach || coach.state !== "ok") {
+      box.append(el("p", { text: (coach && coach.message) || "No coaching is available for this analysis." }));
+      return;
+    }
+    box.append(el("p", { class: "muted small", text: "Evidence from " + coach.engine.id + ". " + coach.engine.shared_model_note }));
+    const cav = el("details", {}, [el("summary", { text: "How to read the coach" })]);
+    const ul = el("ul");
+    coach.caveats.forEach((c) => ul.append(el("li", { text: c })));
+    cav.append(ul);
+    box.append(cav);
+    if (!coach.integrity.ok) box.append(el("p", { class: "error", text: "Integrity check: " + coach.integrity.issues.join("; ") }));
+    box.append(el("p", { class: "small", id: "coach-coverage", text: coach.coverage.consistent_with_expected + " of " +
+      coach.coverage.sounds + " sounds were consistent with the expected sound. " + coach.coverage.note }));
+
+    const obsById = Object.fromEntries(coach.observations.map((o) => [o.id, o]));
+    const patById = Object.fromEntries(coach.patterns.map((p) => [p.id, p]));
+    const tgtByPattern = Object.fromEntries(coach.practice_targets.map((t) => [t.pattern_id, t]));
+    if (!coach.groups.length) box.append(el("p", { text: "Every interpretable sound was consistent with the expected sound." }));
+
+    for (const g of coach.groups) {
+      // Recurring and not-detected groups stay open; long lists of single or
+      // ambiguous observations start collapsed so recurring findings are not buried.
+      const open = g.id === "recurring" || g.id === "not_detected" || g.pattern_ids.length <= COACH_OPEN_LIMIT;
+      const section = el("details", { class: "coach-group", "data-group": g.id }, [
+        el("summary", {}, [el("h4", { text: g.title + " (" + g.pattern_ids.length + ")" })]),
+        el("p", { class: "muted small", text: g.explanation }),
+      ]);
+      section.open = open;
+      for (const pid of g.pattern_ids) section.append(patternCard(patById[pid], obsById, tgtByPattern[pid]));
+      box.append(section);
+    }
+
+    const skipped = coach.observations.filter((o) => o.type === "not_interpreted");
+    if (skipped.length) {
+      const d = el("details", { "data-group": "not_interpreted" }, [el("summary", { text: "Not interpreted (" + skipped.length + ")" })]);
+      const list = el("ul", { class: "small" });
+      skipped.forEach((o) => list.append(el("li", { text: o.word + " /" + (o.expected || o.observed) + "/ — " + o.reasons.join("; ") })));
+      d.append(list);
+      box.append(d);
+    }
+    box.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  function patternCard(p, obsById, target) {
+    const card = el("div", { class: "coach-card", "data-pattern": p.id });
+    const evidence = el("div", { class: "coach-evidence", hidden: "" });
+    const practice = el("div", { class: "coach-practice", hidden: "" });
+    card.append(
+      el("div", { class: "row" }, [
+        el("strong", { class: "ipa", text: coachPatternTitle(p) }),
+        el("span", { class: "chip", text: patternClassLabel(p) }),
+        el("span", { class: "muted small", text: p.occurrences + " occurrence" + (p.occurrences > 1 ? "s" : "") +
+          " · evidence: " + p.evidence_strength.replace("_", " ") }),
+      ]),
+      el("p", { text: p.summary }),
+    );
+    if (p.reference_note) card.append(el("p", { class: "muted small", text: p.reference_note }));
+    card.append(el("div", { class: "row" }, [
+      el("button", { type: "button", class: "view-evidence", text: "View evidence",
+        onclick: () => { evidence.hidden = !evidence.hidden; if (!evidence.childNodes.length) fillEvidence(evidence, p, obsById); } }),
+      target ? el("button", { type: "button", class: "view-practice", text: target.kind === "practice" ? "Practice" : target.kind === "compare" ? "Listen & compare" : "Listen & monitor",
+        onclick: () => { practice.hidden = !practice.hidden; if (!practice.childNodes.length) fillPractice(practice, target); } }) : el("span"),
+    ]), evidence, practice);
+    return card;
+  }
+
+  function fillEvidence(box, p, obsById) {
+    const table = el("table", {}, [el("tr", {}, [
+      el("th", { text: "Word" }), el("th", { text: "Expected → heard" }), el("th", { text: "Interpretation" }),
+      el("th", { text: "Evidence" }), el("th", { text: "Where & context" }), el("th", { text: "Listen" }),
+    ])]);
+    for (const id of p.observation_ids) {
+      const o = obsById[id];
+      const row = el("tr", { "data-observation": o.id, class: "obs-" + o.type });
+      const probs = ["P(/" + (o.expected || o.observed) + "/) " + formatProbability(o.kind === "insertion" ? o.observed_posterior : o.expected_posterior)];
+      if (o.competitor) probs.push("P(/" + o.competitor + "/) " + formatProbability(o.competitor_posterior));
+      const ac = o.acoustic;
+      row.append(
+        el("td", { text: o.word }),
+        el("td", { class: "ipa", text: (o.expected ? "/" + o.expected + "/" : "—") + " → " + (o.observed ? "/" + o.observed + "/" : "not detected") }),
+        el("td", {}, [el("span", { text: OBSERVATION_LABELS[o.type] + " (" + o.confidence + " confidence)" }),
+          el("span", { class: "hint", text: o.reasons.join("; ") })]),
+        el("td", { class: "small", text: probs.join(" · ") + (ac ? " · voiced: " + (ac.voiced === null ? "unavailable" : ac.voiced ? "yes" : "no") +
+          " · relative energy: " + formatMeasure(ac.relative_energy) : "") }),
+        el("td", { class: "small", text: (o.span_ms ? formatSpan(o.span_ms, o.timing_source !== "engine") : "no timing") + " · " + contextText(o.context) +
+          (o.timing_source !== "engine" && o.play_ms ? " · plays " + formatSeconds(o.play_ms[1] - o.play_ms[0]) + " from the estimated location" : "") }),
+        el("td", {}, [
+          o.play_ms ? el("button", { type: "button", class: "play-occurrence", text: "▶ Play exact occurrence", onclick: () => play(o.play_ms, row) }) : el("span", { text: "unavailable" }),
+          o.word_play_ms ? el("button", { type: "button", text: "▶ Play word", onclick: () => play(o.word_play_ms, row) }) : el("span"),
+        ]),
+      );
+      table.append(row);
+    }
+    box.append(table);
+    if (p.counter_evidence_ids.length) {
+      box.append(el("p", { class: "muted small", text: "Heard as expected elsewhere: " +
+        p.counter_evidence_ids.map((id) => obsById[id].word + " (" + formatSpan(obsById[id].span_ms, false) + ")").join(", ") }));
+    }
+  }
+
+  function fillPractice(box, t) {
+    const s = t.levels.sound;
+    box.append(el("p", { text: t.reason }));
+    const sound = el("div", {}, [el("strong", { text: "1. Sound: " }),
+      el("span", { class: "ipa", text: "/" + s.target + "/" + (s.target_hint ? " (" + s.target_hint + ")" : "") +
+        (s.contrast ? " vs /" + s.contrast + "/" + (s.contrast_hint ? " (" + s.contrast_hint + ")" : "") : "") })]);
+    box.append(sound);
+    if (s.guidance) box.append(el("p", { class: "small", text: s.guidance }), el("p", { class: "muted small", text: s.guidance_note }));
+    const words = el("div", {}, [el("strong", { text: "2. Word: " })]);
+    for (const occ of t.occurrences) {
+      words.append(el("button", { type: "button", class: "play-practice-word", text: "▶ " + occ.word,
+        onclick: (ev) => play(occ.word_play_ms || occ.play_ms, ev.target) }));
+    }
+    box.append(words, el("div", {}, [el("strong", { text: "3. Sentence: " }), el("span", { text: t.levels.sentence.text + " " }),
+      el("button", { type: "button", text: "▶ Play whole recording", onclick: () => state.buffer && play([0, state.buffer.duration * 1000], null) })]));
+    box.append(el("p", { class: "muted small", text: "Listen to your own occurrence, then record the word and the sentence again." }));
+  }
+
   // --- history -----------------------------------------------------------------------
   async function refreshHistory() {
     const res = await api("/api/analyses");
@@ -586,6 +762,7 @@ if (typeof document !== "undefined") {
   $("analyze-btn").addEventListener("click", analyse);
   $("play-all-btn").addEventListener("click", () => state.buffer && play([0, state.buffer.duration * 1000], null));
   $("full-feedback-btn").addEventListener("click", showFullFeedback);
+  $("coach-btn").addEventListener("click", showCoach);
   $("record-support").textContent = window.MediaRecorder ? "Recording uses your browser's microphone." : "This browser cannot record; use Upload.";
   loadStatus().then(refreshHistory).catch((e) => showError("Could not reach the app: " + e.message));
 }
