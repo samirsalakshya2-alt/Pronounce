@@ -52,3 +52,5 @@ data/benchmark_wav/
 data/benchmark_manifest.csv
 data/test_recording.wav
 data/test_recording_original.wav
+# Benchmark results: evidence derived from personal recordings.
+data/benchmark_results/
