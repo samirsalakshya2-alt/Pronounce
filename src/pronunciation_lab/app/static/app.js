@@ -271,6 +271,221 @@ function whereText(c) {
   return parts.join(" · ");
 }
 
+// --- M4/M5 evidence renderers (shared by the lab and the M12 reader) ----------------
+// `play(playMs, highlightNode)` plays a window of the analysis WAV the evidence refers to;
+// `playWhole()` plays the whole recording. The renderers hold no state of their own.
+function domEl(tag, attrs, children) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (k === "class") node.className = v;
+    else if (k === "text") node.textContent = v;
+    else if (k.startsWith("on")) node.addEventListener(k.slice(2), v);
+    else node.setAttribute(k, v);
+  }
+  for (const c of children || []) node.append(c);
+  return node;
+}
+
+function createEvidenceRenderers({ el, play, playWhole }) {
+  function patternCard(p, obsById, target) {
+    const card = el("div", { class: "coach-card", "data-pattern": p.id });
+    const evidence = el("div", { class: "coach-evidence", hidden: "" });
+    const practice = el("div", { class: "coach-practice", hidden: "" });
+    card.append(
+      el("div", { class: "row" }, [
+        el("strong", { class: "ipa", text: coachPatternTitle(p) }),
+        el("span", { class: "chip", text: patternClassLabel(p) }),
+        el("span", { class: "muted small", text: p.occurrences + " occurrence" + (p.occurrences > 1 ? "s" : "") +
+          " · evidence: " + p.evidence_strength.replace("_", " ") }),
+      ]),
+      el("p", { text: p.summary }),
+    );
+    if (p.reference_note) card.append(el("p", { class: "muted small", text: p.reference_note }));
+    card.append(el("div", { class: "row" }, [
+      el("button", { type: "button", class: "view-evidence", text: "View evidence",
+        onclick: () => { evidence.hidden = !evidence.hidden; if (!evidence.childNodes.length) fillEvidence(evidence, p, obsById); } }),
+      target ? el("button", { type: "button", class: "view-practice", text: target.kind === "practice" ? "Practice" : target.kind === "compare" ? "Listen & compare" : "Listen & monitor",
+        onclick: () => { practice.hidden = !practice.hidden; if (!practice.childNodes.length) fillPractice(practice, target); } }) : el("span"),
+    ]), evidence, practice);
+    return card;
+  }
+
+  function fillEvidence(box, p, obsById) {
+    const table = el("table", {}, [el("tr", {}, [
+      el("th", { text: "Word" }), el("th", { text: "Expected → heard" }), el("th", { text: "Interpretation" }),
+      el("th", { text: "Evidence" }), el("th", { text: "Where & context" }), el("th", { text: "Listen" }),
+    ])]);
+    for (const id of p.observation_ids) {
+      const o = obsById[id];
+      const row = el("tr", { "data-observation": o.id, class: "obs-" + o.type });
+      const probs = ["P(/" + (o.expected || o.observed) + "/) " + formatProbability(o.kind === "insertion" ? o.observed_posterior : o.expected_posterior)];
+      if (o.competitor) probs.push("P(/" + o.competitor + "/) " + formatProbability(o.competitor_posterior));
+      const ac = o.acoustic;
+      row.append(
+        el("td", { text: o.word }),
+        el("td", { class: "ipa", text: (o.expected ? "/" + o.expected + "/" : "—") + " → " + (o.observed ? "/" + o.observed + "/" : "not detected") }),
+        el("td", {}, [el("span", { text: OBSERVATION_LABELS[o.type] + " (" + o.confidence + " confidence)" }),
+          el("span", { class: "hint", text: o.reasons.join("; ") })]),
+        el("td", { class: "small", text: probs.join(" · ") + (ac ? " · voiced: " + (ac.voiced === null ? "unavailable" : ac.voiced ? "yes" : "no") +
+          " · relative energy: " + formatMeasure(ac.relative_energy) : "") }),
+        el("td", { class: "small", text: (o.span_ms ? formatSpan(o.span_ms, o.timing_source !== "engine") : "no timing") + " · " + contextText(o.context) +
+          (o.timing_source !== "engine" && o.play_ms ? " · plays " + formatSeconds(o.play_ms[1] - o.play_ms[0]) + " from the estimated location" : "") }),
+        el("td", {}, [
+          o.play_ms ? el("button", { type: "button", class: "play-occurrence", text: "▶ Play exact occurrence", onclick: () => play(o.play_ms, row) }) : el("span", { text: "unavailable" }),
+          o.word_play_ms ? el("button", { type: "button", text: "▶ Play word", onclick: () => play(o.word_play_ms, row) }) : el("span"),
+        ]),
+      );
+      table.append(row);
+    }
+    box.append(table);
+    if (p.counter_evidence_ids.length) {
+      box.append(el("p", { class: "muted small", text: "Heard as expected elsewhere: " +
+        p.counter_evidence_ids.map((id) => obsById[id].word + " (" + formatSpan(obsById[id].span_ms, false) + ")").join(", ") }));
+    }
+  }
+
+  function fillPractice(box, t) {
+    const s = t.levels.sound;
+    box.append(el("p", { text: t.reason }));
+    const sound = el("div", {}, [el("strong", { text: "1. Sound: " }),
+      el("span", { class: "ipa", text: "/" + s.target + "/" + (s.target_hint ? " (" + s.target_hint + ")" : "") +
+        (s.contrast ? " vs /" + s.contrast + "/" + (s.contrast_hint ? " (" + s.contrast_hint + ")" : "") : "") })]);
+    box.append(sound);
+    if (s.guidance) box.append(el("p", { class: "small", text: s.guidance }), el("p", { class: "muted small", text: s.guidance_note }));
+    const words = el("div", {}, [el("strong", { text: "2. Word: " })]);
+    for (const occ of t.occurrences) {
+      words.append(el("button", { type: "button", class: "play-practice-word", text: "▶ " + occ.word,
+        onclick: (ev) => play(occ.word_play_ms || occ.play_ms, ev.target) }));
+    }
+    box.append(words, el("div", {}, [el("strong", { text: "3. Sentence: " }), el("span", { text: t.levels.sentence.text + " " }),
+      el("button", { type: "button", text: "▶ Play whole recording", onclick: () => playWhole() })]));
+    box.append(el("p", { class: "muted small", text: "Listen to your own occurrence, then record the word and the sentence again." }));
+  }
+
+  function reductionCard(c) {
+    const card = el("div", { class: "coach-card", "data-candidate": c.id });
+    const chain = el("ol", { class: "reduction-chain small" });
+    reductionChain(c).forEach((line) => {
+      const [step, ...rest] = line.split(": ");
+      chain.append(el("li", {}, [el("span", { class: "step", text: step + ": " }), el("span", { text: rest.join(": ") })]));
+    });
+    card.append(
+      el("div", { class: "row" }, [
+        el("strong", { class: "ipa", text: c.interpretation.label + " — /" + c.expected + "/ in '" + c.where.word + "'" }),
+        el("span", { class: "chip", text: STRENGTH_LABELS[c.evidence_strength] }),
+      ]),
+      el("p", { text: c.summary }),
+      el("p", { class: "small", text: "Where: " + whereText(c) + " · " + formatSpan(c.where.span_ms, c.where.timing_source !== "engine") }),
+      chain,
+    );
+    for (const e of c.interpretation.candidate_explanations) card.append(el("p", { class: "muted small", text: e.text }));
+    card.append(el("div", { class: "row" }, [
+      el("button", { type: "button", class: "play-candidate", text: "▶ Play exact occurrence", onclick: () => play(c.where.play_ms, card) }),
+      c.where.word_play_ms ? el("button", { type: "button", text: "▶ Play word", onclick: () => play(c.where.word_play_ms, card) }) : el("span"),
+    ]));
+    return card;
+  }
+
+  function sideText(s) {
+    if (!s) return "no matching sound in this engine's inventory";
+    const heard = s.observed ? "decoded /" + s.observed + "/" : "not decoded";
+    const cand = s.candidate ? s.candidate.label + " (" + STRENGTH_LABELS[s.candidate.evidence_strength] + ")" : "not listed";
+    return "/" + s.expected + "/ " + heard + " at " + (s.span_ms ? formatSpan(s.span_ms, s.timing_source !== "engine") : "no timing") + " — " + cand;
+  }
+
+  function renderComparison(box, cmp) {
+    box.innerHTML = "";
+    box.append(el("p", { class: "muted small engine-note", text: cmp.shared_model_note }));
+    if (!cmp.integrity.ok) box.append(el("p", { class: "error", text: "Integrity check: " + cmp.integrity.issues.join("; ") }));
+    const [a, b] = cmp.engines;
+    if (!cmp.rows.length) { box.append(el("p", { text: "Neither engine lists a candidate." })); return; }
+    const table = el("table", { class: "compare-table" }, [el("tr", {}, [
+      el("th", { text: "Word" }), el("th", { text: a }), el("th", { text: b }), el("th", { text: "How they relate" }), el("th", { text: "Listen" })])]);
+    for (const r of cmp.rows) {
+      const row = el("tr", { "data-agreement": r.agreement });
+      const play_ms = (r.first && r.first.play_ms) || (r.second && r.second.play_ms);
+      row.append(
+        el("td", { text: r.word }),
+        el("td", { class: "small", text: sideText(r.first) }),
+        el("td", { class: "small", text: sideText(r.second) }),
+        el("td", { class: "small" }, [el("span", { text: agreementText(r.agreement, a, b) }),
+          ...r.notes.map((n) => el("span", { class: "hint", text: n.text }))]),
+        el("td", {}, [play_ms ? el("button", { type: "button", class: "play-compare", text: "▶ Play", onclick: () => play(play_ms, row) }) : el("span")]),
+      );
+      table.append(row);
+  }
+    box.append(table);
+  }
+  /**
+   * The MVP word detail: one row per expected sound of the word, from the M3 view
+   * (`view.words[i]`). `soundCell(s, row)` builds the last column (the lab adds
+   * listening notes); without it the cell only plays the sound.
+   */
+  function wordDetail(box, w, { anchor = null, listenHeader = "Listen", soundCell = null } = {}) {
+    box.append(el("h3", { text: "“" + w.word + "” — " + wordTitle(w) }));
+    const wordRow = el("div", { class: "row" }, [
+      el("button", { type: "button", class: "play-word", text: "▶ Play word", onclick: () => play(w.play_ms, anchor, "word") }),
+      el("span", { class: "muted small", text: "Word located at " + formatSpan(w.span_ms, w.timing_estimated) +
+        (w.flagged_by_engine ? " · flagged by OpenPronounce" : "") }),
+    ]);
+    box.append(wordRow);
+
+    const table = el("table", {}, [el("tr", {}, [
+      el("th", { text: "Expected" }), el("th", { text: "Heard" }), el("th", { text: "What the recogniser found" }),
+      el("th", { text: "Alternatives" }), el("th", { text: "Where" }), el("th", { text: listenHeader }),
+    ])]);
+    for (const s of w.sounds) {
+      const row = el("tr", { class: "cat-" + s.category, "data-sound": String(s.index) });
+      row.append(
+        el("td", {}, [el("span", { class: "ipa", text: "/" + s.expected + "/" }), el("span", { class: "hint", text: s.expected_hint || "" })]),
+        el("td", {}, [el("span", { class: "ipa", text: s.heard ? "/" + s.heard + "/" : "—" }), el("span", { class: "hint", text: s.heard_hint || "" })]),
+        el("td", {}, [
+          el("span", { text: s.text }),
+          el("span", { class: "hint", text: "chance of /" + s.expected + "/: " + formatProbability(s.expected_probability) }),
+          el("span", { class: "hint", text: extraSoundsText(s.extra_sounds_after) }),
+        ]),
+        el("td", { class: "ipa small", text: s.alternatives.slice(0, 3).map((a) => "/" + a.phone + "/ " + formatProbability(a.probability)).join(", ") }),
+        el("td", { class: "small", text: formatSpan(s.span_ms, s.timing_estimated) }),
+        soundCell ? soundCell(s, row) : el("td", { class: "notes" }, [el("button", { type: "button", class: "play-sound",
+          text: "▶ Play sound", onclick: () => play(s.play_ms, row, "sound") })]),
+      );
+      table.append(row);
+    }
+    box.append(table);
+    box.append(el("p", { class: "muted small", text:
+      "“Play sound” plays " + formatSeconds(300) + " around the point where the sound was located; the exact point is shown under “Where”." }));
+  }
+
+  return { patternCard, fillEvidence, fillPractice, reductionCard, sideText, renderComparison, wordDetail };
+}
+
+// --- M12 reader: the sentence, word by word ----------------------------------------------
+const WORD_TOKEN = /[\p{L}\p{N}]+(?:['’\-][\p{L}\p{N}]+)*/gu;
+const normWord = (t) => (t || "").toLowerCase().replace(/[’]/g, "'").replace(/[^\p{L}\p{N}']/gu, "");
+
+/**
+ * The complete original text as pieces in order: {text} for separators and words
+ * the analysis has no word for, {text, wordIndex} for words matched (in order,
+ * with a short look-ahead) to `words` (the view's words). Nothing is dropped.
+ */
+function alignWords(text, words) {
+  const pieces = [];
+  let last = 0, wi = 0;
+  for (const m of text.matchAll(WORD_TOKEN)) {
+    if (m.index > last) pieces.push({ text: text.slice(last, m.index) });
+    const t = normWord(m[0]);
+    let found = null;
+    for (let k = wi; k < Math.min(words.length, wi + 3); k++) {
+      if (normWord(words[k].word) === t) { found = k; break; }
+    }
+    if (found === null) pieces.push({ text: m[0] });
+    else { pieces.push({ text: m[0], wordIndex: found }); wi = found + 1; }
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) pieces.push({ text: text.slice(last) });
+  return pieces;
+}
+
 if (typeof module !== "undefined") {
   module.exports = {
     CATEGORY_TITLES, WORD_TITLES, formatSeconds, formatSpan, formatProbability,
@@ -278,6 +493,7 @@ if (typeof module !== "undefined") {
     wordTitle, ALL_WORD_TITLES, fullFeedbackText,
     OBSERVATION_LABELS, PATTERN_CLASS_LABELS, coachPatternTitle, patternClassLabel, formatMeasure, contextText,
     STRENGTH_LABELS, AGREEMENT_LABELS, agreementText, slotText, reductionChain, whereText,
+    domEl, createEvidenceRenderers, alignWords,
   };
 }
 
@@ -285,24 +501,19 @@ if (typeof module !== "undefined") {
 // Browser UI
 // ---------------------------------------------------------------------------
 
-if (typeof document !== "undefined") {
+// The lab page only (the M12 reader loads the renderers above without this block).
+if (typeof document !== "undefined" && document.getElementById("analyze-btn")) {
   const $ = (id) => document.getElementById(id);
   const state = {
     status: null, tab: "record", recordedBlob: null, recorder: null, chunks: [],
     view: null, audioCtx: null, buffer: null, source: null, selectedWord: null, notes: {},
   };
 
-  function el(tag, attrs, children) {
-    const node = document.createElement(tag);
-    for (const [k, v] of Object.entries(attrs || {})) {
-      if (k === "class") node.className = v;
-      else if (k === "text") node.textContent = v;
-      else if (k.startsWith("on")) node.addEventListener(k.slice(2), v);
-      else node.setAttribute(k, v);
-    }
-    for (const c of children || []) node.append(c);
-    return node;
-  }
+  const el = domEl;
+  const { patternCard, fillEvidence, fillPractice, reductionCard, renderComparison, wordDetail } = createEvidenceRenderers({
+    el, play: (playMs, highlight) => play(playMs, highlight),
+    playWhole: () => state.buffer && play([0, state.buffer.duration * 1000], null),
+  });
 
   function showError(message) {
     const box = $("error-box");
@@ -534,37 +745,7 @@ if (typeof document !== "undefined") {
     const box = $("word-detail");
     box.hidden = false;
     box.innerHTML = "";
-    box.append(el("h3", { text: "“" + w.word + "” — " + wordTitle(w) }));
-    const wordRow = el("div", { class: "row" }, [
-      el("button", { type: "button", text: "▶ Play word", onclick: () => play(w.play_ms, button) }),
-      el("span", { class: "muted small", text: "Word located at " + formatSpan(w.span_ms, w.timing_estimated) +
-        (w.flagged_by_engine ? " · flagged by OpenPronounce" : "") }),
-    ]);
-    box.append(wordRow);
-
-    const table = el("table", {}, [el("tr", {}, [
-      el("th", { text: "Expected" }), el("th", { text: "Heard" }), el("th", { text: "What the recogniser found" }),
-      el("th", { text: "Alternatives" }), el("th", { text: "Where" }), el("th", { text: "Listen & note" }),
-    ])]);
-    for (const s of w.sounds) {
-      const row = el("tr", { class: "cat-" + s.category, "data-sound": String(s.index) });
-      row.append(
-        el("td", {}, [el("span", { class: "ipa", text: "/" + s.expected + "/" }), el("span", { class: "hint", text: s.expected_hint || "" })]),
-        el("td", {}, [el("span", { class: "ipa", text: s.heard ? "/" + s.heard + "/" : "—" }), el("span", { class: "hint", text: s.heard_hint || "" })]),
-        el("td", {}, [
-          el("span", { text: s.text }),
-          el("span", { class: "hint", text: "chance of /" + s.expected + "/: " + formatProbability(s.expected_probability) }),
-          el("span", { class: "hint", text: extraSoundsText(s.extra_sounds_after) }),
-        ]),
-        el("td", { class: "ipa small", text: s.alternatives.slice(0, 3).map((a) => "/" + a.phone + "/ " + formatProbability(a.probability)).join(", ") }),
-        el("td", { class: "small", text: formatSpan(s.span_ms, s.timing_estimated) }),
-        noteCell(s, row),
-      );
-      table.append(row);
-    }
-    box.append(table);
-    box.append(el("p", { class: "muted small", text:
-      "“Play sound” plays " + formatSeconds(300) + " around the point where the sound was located; the exact point is shown under “Where”." }));
+    wordDetail(box, w, { anchor: button, listenHeader: "Listen & note", soundCell: noteCell });
   }
 
   function noteCell(s, row) {
@@ -721,81 +902,6 @@ if (typeof document !== "undefined") {
     box.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
-  function patternCard(p, obsById, target) {
-    const card = el("div", { class: "coach-card", "data-pattern": p.id });
-    const evidence = el("div", { class: "coach-evidence", hidden: "" });
-    const practice = el("div", { class: "coach-practice", hidden: "" });
-    card.append(
-      el("div", { class: "row" }, [
-        el("strong", { class: "ipa", text: coachPatternTitle(p) }),
-        el("span", { class: "chip", text: patternClassLabel(p) }),
-        el("span", { class: "muted small", text: p.occurrences + " occurrence" + (p.occurrences > 1 ? "s" : "") +
-          " · evidence: " + p.evidence_strength.replace("_", " ") }),
-      ]),
-      el("p", { text: p.summary }),
-    );
-    if (p.reference_note) card.append(el("p", { class: "muted small", text: p.reference_note }));
-    card.append(el("div", { class: "row" }, [
-      el("button", { type: "button", class: "view-evidence", text: "View evidence",
-        onclick: () => { evidence.hidden = !evidence.hidden; if (!evidence.childNodes.length) fillEvidence(evidence, p, obsById); } }),
-      target ? el("button", { type: "button", class: "view-practice", text: target.kind === "practice" ? "Practice" : target.kind === "compare" ? "Listen & compare" : "Listen & monitor",
-        onclick: () => { practice.hidden = !practice.hidden; if (!practice.childNodes.length) fillPractice(practice, target); } }) : el("span"),
-    ]), evidence, practice);
-    return card;
-  }
-
-  function fillEvidence(box, p, obsById) {
-    const table = el("table", {}, [el("tr", {}, [
-      el("th", { text: "Word" }), el("th", { text: "Expected → heard" }), el("th", { text: "Interpretation" }),
-      el("th", { text: "Evidence" }), el("th", { text: "Where & context" }), el("th", { text: "Listen" }),
-    ])]);
-    for (const id of p.observation_ids) {
-      const o = obsById[id];
-      const row = el("tr", { "data-observation": o.id, class: "obs-" + o.type });
-      const probs = ["P(/" + (o.expected || o.observed) + "/) " + formatProbability(o.kind === "insertion" ? o.observed_posterior : o.expected_posterior)];
-      if (o.competitor) probs.push("P(/" + o.competitor + "/) " + formatProbability(o.competitor_posterior));
-      const ac = o.acoustic;
-      row.append(
-        el("td", { text: o.word }),
-        el("td", { class: "ipa", text: (o.expected ? "/" + o.expected + "/" : "—") + " → " + (o.observed ? "/" + o.observed + "/" : "not detected") }),
-        el("td", {}, [el("span", { text: OBSERVATION_LABELS[o.type] + " (" + o.confidence + " confidence)" }),
-          el("span", { class: "hint", text: o.reasons.join("; ") })]),
-        el("td", { class: "small", text: probs.join(" · ") + (ac ? " · voiced: " + (ac.voiced === null ? "unavailable" : ac.voiced ? "yes" : "no") +
-          " · relative energy: " + formatMeasure(ac.relative_energy) : "") }),
-        el("td", { class: "small", text: (o.span_ms ? formatSpan(o.span_ms, o.timing_source !== "engine") : "no timing") + " · " + contextText(o.context) +
-          (o.timing_source !== "engine" && o.play_ms ? " · plays " + formatSeconds(o.play_ms[1] - o.play_ms[0]) + " from the estimated location" : "") }),
-        el("td", {}, [
-          o.play_ms ? el("button", { type: "button", class: "play-occurrence", text: "▶ Play exact occurrence", onclick: () => play(o.play_ms, row) }) : el("span", { text: "unavailable" }),
-          o.word_play_ms ? el("button", { type: "button", text: "▶ Play word", onclick: () => play(o.word_play_ms, row) }) : el("span"),
-        ]),
-      );
-      table.append(row);
-    }
-    box.append(table);
-    if (p.counter_evidence_ids.length) {
-      box.append(el("p", { class: "muted small", text: "Heard as expected elsewhere: " +
-        p.counter_evidence_ids.map((id) => obsById[id].word + " (" + formatSpan(obsById[id].span_ms, false) + ")").join(", ") }));
-    }
-  }
-
-  function fillPractice(box, t) {
-    const s = t.levels.sound;
-    box.append(el("p", { text: t.reason }));
-    const sound = el("div", {}, [el("strong", { text: "1. Sound: " }),
-      el("span", { class: "ipa", text: "/" + s.target + "/" + (s.target_hint ? " (" + s.target_hint + ")" : "") +
-        (s.contrast ? " vs /" + s.contrast + "/" + (s.contrast_hint ? " (" + s.contrast_hint + ")" : "") : "") })]);
-    box.append(sound);
-    if (s.guidance) box.append(el("p", { class: "small", text: s.guidance }), el("p", { class: "muted small", text: s.guidance_note }));
-    const words = el("div", {}, [el("strong", { text: "2. Word: " })]);
-    for (const occ of t.occurrences) {
-      words.append(el("button", { type: "button", class: "play-practice-word", text: "▶ " + occ.word,
-        onclick: (ev) => play(occ.word_play_ms || occ.play_ms, ev.target) }));
-    }
-    box.append(words, el("div", {}, [el("strong", { text: "3. Sentence: " }), el("span", { text: t.levels.sentence.text + " " }),
-      el("button", { type: "button", text: "▶ Play whole recording", onclick: () => state.buffer && play([0, state.buffer.duration * 1000], null) })]));
-    box.append(el("p", { class: "muted small", text: "Listen to your own occurrence, then record the word and the sentence again." }));
-  }
-
   // --- M5 Reduction & Connected Speech -------------------------------------------------
   function showReduction() {
     const view = state.view;
@@ -841,37 +947,6 @@ if (typeof document !== "undefined") {
     box.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
-  function reductionCard(c) {
-    const card = el("div", { class: "coach-card", "data-candidate": c.id });
-    const chain = el("ol", { class: "reduction-chain small" });
-    reductionChain(c).forEach((line) => {
-      const [step, ...rest] = line.split(": ");
-      chain.append(el("li", {}, [el("span", { class: "step", text: step + ": " }), el("span", { text: rest.join(": ") })]));
-    });
-    card.append(
-      el("div", { class: "row" }, [
-        el("strong", { class: "ipa", text: c.interpretation.label + " — /" + c.expected + "/ in '" + c.where.word + "'" }),
-        el("span", { class: "chip", text: STRENGTH_LABELS[c.evidence_strength] }),
-      ]),
-      el("p", { text: c.summary }),
-      el("p", { class: "small", text: "Where: " + whereText(c) + " · " + formatSpan(c.where.span_ms, c.where.timing_source !== "engine") }),
-      chain,
-    );
-    for (const e of c.interpretation.candidate_explanations) card.append(el("p", { class: "muted small", text: e.text }));
-    card.append(el("div", { class: "row" }, [
-      el("button", { type: "button", class: "play-candidate", text: "▶ Play exact occurrence", onclick: () => play(c.where.play_ms, card) }),
-      c.where.word_play_ms ? el("button", { type: "button", text: "▶ Play word", onclick: () => play(c.where.word_play_ms, card) }) : el("span"),
-    ]));
-    return card;
-  }
-
-  function sideText(s) {
-    if (!s) return "no matching sound in this engine's inventory";
-    const heard = s.observed ? "decoded /" + s.observed + "/" : "not decoded";
-    const cand = s.candidate ? s.candidate.label + " (" + STRENGTH_LABELS[s.candidate.evidence_strength] + ")" : "not listed";
-    return "/" + s.expected + "/ " + heard + " at " + (s.span_ms ? formatSpan(s.span_ms, s.timing_source !== "engine") : "no timing") + " — " + cand;
-  }
-
   async function runCompare(box, btn) {
     btn.disabled = true;
     box.innerHTML = "";
@@ -879,27 +954,7 @@ if (typeof document !== "undefined") {
     try {
       const cmp = await api("/api/analyses/" + state.view.analysis_id + "/compare", {
         method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
-      box.innerHTML = "";
-      box.append(el("p", { class: "muted small engine-note", text: cmp.shared_model_note }));
-      if (!cmp.integrity.ok) box.append(el("p", { class: "error", text: "Integrity check: " + cmp.integrity.issues.join("; ") }));
-      const [a, b] = cmp.engines;
-      if (!cmp.rows.length) { box.append(el("p", { text: "Neither engine lists a candidate." })); return; }
-      const table = el("table", { class: "compare-table" }, [el("tr", {}, [
-        el("th", { text: "Word" }), el("th", { text: a }), el("th", { text: b }), el("th", { text: "How they relate" }), el("th", { text: "Listen" })])]);
-      for (const r of cmp.rows) {
-        const row = el("tr", { "data-agreement": r.agreement });
-        const play_ms = (r.first && r.first.play_ms) || (r.second && r.second.play_ms);
-        row.append(
-          el("td", { text: r.word }),
-          el("td", { class: "small", text: sideText(r.first) }),
-          el("td", { class: "small", text: sideText(r.second) }),
-          el("td", { class: "small" }, [el("span", { text: agreementText(r.agreement, a, b) }),
-            ...r.notes.map((n) => el("span", { class: "hint", text: n.text }))]),
-          el("td", {}, [play_ms ? el("button", { type: "button", class: "play-compare", text: "▶ Play", onclick: () => play(play_ms, row) }) : el("span")]),
-        );
-        table.append(row);
-      }
-      box.append(table);
+      renderComparison(box, cmp);
     } catch (e) {
       box.innerHTML = "";
       box.append(el("p", { class: "error", text: "Comparison failed: " + e.message }));

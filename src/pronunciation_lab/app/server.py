@@ -13,6 +13,9 @@ Binds to 127.0.0.1 by default. Endpoints:
     GET  /api/analyses/<id>/notes        listening notes for that analysis
     POST /api/notes                      JSON {analysis_id, sound_index, verdict, comment?}
 
+M12 reader routes (/read, /api/articles, /api/sessions/...) are in
+`pronunciation_lab.reader.http` and only active when a ReaderService is attached.
+
 Errors are JSON: {"error": {"code": ..., "message": ...}}.
 """
 
@@ -29,9 +32,12 @@ from urllib.parse import parse_qs, urlparse
 
 from pronunciation_lab.app.audio_input import MAX_UPLOAD_BYTES
 from pronunciation_lab.app.service import AnalysisService, UserError
+from pronunciation_lab.reader import http as reader_http
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
-STATIC_FILES = {"index.html", "app.js", "style.css"}
+STATIC_FILES = {"index.html", "app.js", "style.css",
+                # M12 reader
+                "read.html", "reader.js", "reader.css", "reader-core.js", "reader-feedback.js", "capture-worklet.js"}
 MAX_JSON_BYTES = 64 * 1024
 _ANALYSIS_RE = re.compile(r"^/api/analyses/([^/]+)(/audio|/notes)?$")
 
@@ -120,12 +126,17 @@ class Handler(BaseHTTPRequestHandler):
 
         if path in ("/", "/index.html"):
             return self._static("index.html")
+        if path in ("/read", "/read/"):
+            return self._static("read.html")
         if path.startswith("/static/"):
             return self._static(path[len("/static/"):])
         if path == "/api/status":
             return self._json(200, service.status())
         if path == "/api/analyses":
             return self._json(200, {"analyses": service.recent()})
+
+        if reader_http.handle_get(self, path, parse_qs(url.query)):
+            return None
 
         match = _ANALYSIS_RE.match(path)
         if match:
@@ -175,6 +186,9 @@ class Handler(BaseHTTPRequestHandler):
             body = {} if self.headers.get("Content-Length") in (None, "0") else self._json_body()
             return self._json(200, service.compare_engines(m.group(1), body.get("engine")))
 
+        if reader_http.handle_post(self, url.path):
+            return None
+
         if url.path == "/api/notes":
             body = self._json_body()
             note = service.add_note(
@@ -192,9 +206,11 @@ class LabServer(ThreadingHTTPServer):
     # connections at once (page assets + API calls) got connection resets.
     request_queue_size = 64
 
-    def __init__(self, address: tuple[str, int], service: AnalysisService, *, verbose: bool = False) -> None:
+    def __init__(self, address: tuple[str, int], service: AnalysisService, *, verbose: bool = False,
+                 reader: Any = None) -> None:
         super().__init__(address, Handler)
         self.service = service
+        self.reader = reader  # M12 ReaderService, optional
         self.verbose = verbose
         self.last_exception: Exception | None = None
 
@@ -204,8 +220,9 @@ class LabServer(ThreadingHTTPServer):
         return f"http://{host}:{port}/"
 
 
-def start_in_thread(service: AnalysisService, host: str = "127.0.0.1", port: int = 0) -> tuple[LabServer, threading.Thread]:
-    server = LabServer((host, port), service)
+def start_in_thread(service: AnalysisService, host: str = "127.0.0.1", port: int = 0,
+                    reader: Any = None) -> tuple[LabServer, threading.Thread]:
+    server = LabServer((host, port), service, reader=reader)
     thread = threading.Thread(target=server.serve_forever, name="pronunciation-lab-server", daemon=True)
     thread.start()
     return server, thread

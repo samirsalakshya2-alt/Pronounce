@@ -32,14 +32,11 @@ from pronunciation_lab.app.audio_input import (
     AudioInputError,
     PreparedAudio,
     ffmpeg_available,
-    is_silent,
     prepare_audio,
 )
-from pronunciation_lab.app.coach import build_coach
-from pronunciation_lab.app.diagnosis import build_view
 from pronunciation_lab.app.engine_compare import compare, validate_comparison
-from pronunciation_lab.app.reduction import build_reduction, empty_reduction
-from pronunciation_lab.benchmark.base import PronunciationEngine, safe_analyze
+from pronunciation_lab.app.pipeline import analyze_pipeline
+from pronunciation_lab.benchmark.base import PronunciationEngine
 from pronunciation_lab.benchmark.engines import ENGINES, create_engine
 from pronunciation_lab.benchmark.runner import classify_engine
 
@@ -275,27 +272,9 @@ class AnalysisService:
             shutil.rmtree(workdir, ignore_errors=True)
             raise UserError(exc.code, exc.message) from exc
 
-        with self._lock:
-            result = safe_analyze(engine, audio.analysis_path, text,
-                                  recording_id=f"app-{aid[:8]}", original_path=audio.original_path)
-            self._warm.add(eid)
-
-        view = build_view(result)
-        # M4: interpretation of the same evidence (no extra inference).
-        coach = build_coach(result)
-        coach_timing = coach.pop("_timing_ms", None)
-        view["coach"] = coach
-        view["processing"]["coach_ms"] = sum(coach_timing.values()) if coach_timing else 0.0
-        # M5: reduction / connected-speech layer over the M4 observations (M4 output unchanged).
-        if coach["state"] == "ok":
-            reduction = build_reduction(result, coach["observations"])
-        else:
-            reduction = empty_reduction(coach["state"], {"id": result.engine.name, "model": result.engine.model,
-                                                         "phone_set": result.phone_set})
-        view["reduction"] = reduction
-        view["processing"]["reduction_ms"] = reduction.pop("timing_ms")
-        if view.get("state") == "no_speech" and is_silent(audio.analysis_path):
-            view["message"] = "The recording appears to be silent. Check that the microphone is working."
+        result, view = analyze_pipeline(engine, audio.analysis_path, text, recording_id=f"app-{aid[:8]}",
+                                        lock=self._lock, original_path=audio.original_path,
+                                        on_inference_done=lambda: self._warm.add(eid))
         view |= {
             "analysis_id": aid,
             "source": source_label,

@@ -15,6 +15,8 @@ from pathlib import Path
 
 from pronunciation_lab.app.server import LabServer
 from pronunciation_lab.app.service import AnalysisService
+from pronunciation_lab.reader.service import ReaderService
+from pronunciation_lab.reader.store import ReaderStore
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
@@ -27,6 +29,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="where the (optional) benchmark recordings and listening notes live")
     parser.add_argument("--notes-file", type=Path, default=None,
                         help="listening notes file (default: <data-dir>/listening_notes/notes.jsonl)")
+    parser.add_argument("--reader-dir", type=Path, default=None,
+                        help="where reading sessions and their recordings are kept "
+                             "(default: ~/.pronunciation_lab/reader, outside the repository)")
     parser.add_argument("--no-browser", action="store_true")
     parser.add_argument("--no-warmup", action="store_true", help="load the model on first analysis instead")
     parser.add_argument("--verbose", action="store_true")
@@ -34,22 +39,25 @@ def main(argv: list[str] | None = None) -> int:
 
     notes = args.notes_file or args.data_dir / "listening_notes" / "notes.jsonl"
     service = AnalysisService(data_dir=args.data_dir, notes_path=notes)
+    reader = ReaderService(ReaderStore(args.reader_dir), service)
     try:
-        server = LabServer((args.host, args.port), service, verbose=args.verbose)
+        server = LabServer((args.host, args.port), service, verbose=args.verbose, reader=reader)
     except OSError as exc:
+        reader.close()
         service.close()
         print(f"Could not start on {args.host}:{args.port}: {exc}", file=sys.stderr)
         return 2
 
     usable = [e["label"] for e in service.engines.values() if e["state"] == "runnable"]
     print(f"Pronunciation Lab running at {server.url}", flush=True)
+    print(f"Reader: {server.url}read  (sessions in {reader.store.root})", flush=True)
     print(f"Engines available: {', '.join(usable) or 'none'}", flush=True)
     print("Press Ctrl+C to stop.", flush=True)
 
     if not args.no_warmup:
         threading.Thread(target=service.warmup, name="warmup", daemon=True).start()
     if not args.no_browser:
-        threading.Timer(0.5, webbrowser.open, args=(server.url,)).start()
+        threading.Timer(0.5, webbrowser.open, args=(server.url + "read",)).start()
 
     def stop(signum, frame):  # noqa: ARG001
         threading.Thread(target=server.shutdown, daemon=True).start()
@@ -65,6 +73,7 @@ def main(argv: list[str] | None = None) -> int:
         pass
     finally:
         server.server_close()
+        reader.close()
         service.close()
         print("Stopped.", flush=True)
     return 0

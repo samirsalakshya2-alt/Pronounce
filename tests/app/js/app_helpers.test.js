@@ -232,4 +232,25 @@ test("whereText and strength labels", () => {
   }
 });
 
+test("alignWords: the complete original sentence, words matched in order", () => {
+  const words = ["think", "about", "the", "three", "things", "that", "you", "want", "to", "change"].map((word, i) => ({ word, index: i }));
+  const text = "Think about the three things that you want to change.";
+  const pieces = h.alignWords(text, words);
+  assert.equal(pieces.map((p) => p.text).join(""), text);               // nothing dropped, order kept
+  assert.deepEqual(pieces.filter((p) => p.wordIndex !== undefined).map((p) => p.wordIndex), [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+  assert.equal(pieces.find((p) => p.wordIndex === 0).text, "Think");     // original capitals
+  assert.equal(pieces.at(-1).text, ".");                                 // punctuation kept as text
+});
+
+test("alignWords: apostrophes, hyphens, unmatched words and look-ahead", () => {
+  const text = "“Don't stop,” she said — a well-known 2024 line.";
+  const words = ["don't", "stop", "she", "said", "a", "well-known", "line"].map((word, i) => ({ word, index: i }));
+  const pieces = h.alignWords(text, words);
+  assert.equal(pieces.map((p) => p.text).join(""), text);
+  const matched = pieces.filter((p) => p.wordIndex !== undefined).map((p) => p.text);
+  assert.deepEqual(matched, ["Don't", "stop", "she", "said", "a", "well-known", "line"]);
+  assert.ok(pieces.some((p) => p.text === "2024" && p.wordIndex === undefined));   // shown, not clickable
+  assert.deepEqual(h.alignWords("Hello there.", []).map((p) => p.text).join(""), "Hello there.");
+});
+
 console.log(`ok ${n} tests`);

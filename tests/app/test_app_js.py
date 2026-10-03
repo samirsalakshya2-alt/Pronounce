@@ -113,6 +113,8 @@ def test_full_feedback_in_a_real_browser(real_server, tmp_path):
 
     # existing word-level feedback is identical before and after using the full view
     assert r["detailBefore"] == r["detailAfter"] and "“three”" in r["detailBefore"]
+    # the lab's word detail keeps its listening-notes column (shared word renderer, M12)
+    assert "Listen & note" in r["detailBefore"] and "I hear /" in r["detailBefore"] and "Can't tell" in r["detailBefore"]
     assert len(r["wordButtons"]) == 10
     # exact-audio playback, both views
     assert r["wordPlaybackHighlighted"] and r["fullSoundHighlighted"] and r["fullSoundCleared"] and r["fullWordHighlighted"]

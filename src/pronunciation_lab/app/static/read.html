@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pronounce — Reader</title>
+<link rel="stylesheet" href="/static/reader.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="/read">Pronounce</a>
+  <span id="top-title" class="top-title"></span>
+  <span id="progress" class="progress" hidden></span>
+  <a class="lab-link" href="/">Lab</a>
+</header>
+
+<!-- Entry: paste an article -------------------------------------------------- -->
+<main id="entry" class="entry" hidden>
+  <h1>Read an article aloud</h1>
+  <p class="lede">Paste an article. Click a sentence to start reading it; click the next sentence when you get there.
+    Each sentence is recorded and listened to in the background while you keep reading.</p>
+  <form id="entry-form">
+    <input id="entry-title" type="text" placeholder="Title (optional)" maxlength="200" autocomplete="off">
+    <input id="entry-source" type="text" placeholder="Source or subtitle (optional)" maxlength="200" autocomplete="off">
+    <textarea id="entry-text" rows="14" placeholder="Paste the article text here…"></textarea>
+    <details class="settings"><summary>Settings</summary>
+      <label for="entry-engine">Listening model</label> <select id="entry-engine"></select>
+      <p class="hint">Both local models use the same acoustic model; you can compare them per sentence later.</p>
+    </details>
+    <button id="entry-start" type="submit" class="primary">Start reading</button>
+    <p id="entry-error" class="error" hidden></p>
+  </form>
+  <section id="recent" hidden><h2>Continue reading</h2><ul id="recent-list"></ul></section>
+</main>
+
+<!-- Reader --------------------------------------------------------------------- -->
+<div id="reader" class="reader" hidden>
+  <article id="article" class="article">
+    <h1 id="article-title"></h1>
+    <p id="article-source" class="source" hidden></p>
+    <div id="article-body" class="body"></div>
+    <section id="summary" class="summary" hidden></section>
+  </article>
+
+  <aside id="rail" class="rail" aria-label="Recording">
+    <div id="mic-state" class="mic-state" data-state="idle">
+      <span class="dot" aria-hidden="true"></span>
+      <span id="mic-label">Click a sentence to start reading</span>
+      <span id="mic-timer" class="timer"></span>
+    </div>
+    <div id="level" class="level" aria-hidden="true"><span id="level-bar"></span></div>
+    <div class="controls">
+      <button type="button" id="pause-btn" disabled>❚❚ Pause</button>
+      <button type="button" id="stop-btn" class="stop" disabled>■ Stop</button>
+      <button type="button" id="finish-btn" disabled>Finish reading</button>
+    </div>
+    <p id="queue" class="queue"></p>
+    <p id="notice" class="notice" hidden></p>
+    <div id="legend" class="legend" hidden aria-label="Word colours"></div>
+    <div id="rail-feedback" class="rail-feedback"></div>
+    <p class="keys">Space pause / resume · J next · K previous · Esc stop</p>
+  </aside>
+</div>
+
+<script src="/static/reader-core.js"></script>
+<script src="/static/app.js"></script>
+<script src="/static/reader-feedback.js"></script>
+<script src="/static/reader.js"></script>
+</body>
+</html>
