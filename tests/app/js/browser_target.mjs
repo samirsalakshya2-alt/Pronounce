@@ -73,10 +73,11 @@ async function main() {
     out.mismatchAnnotated = { annotated: mmSeg.classList.contains('annotated'), words: mmSeg.querySelectorAll('.aw').length,
       matchAnnotated: document.querySelector('.seg[data-seg=${JSON.stringify(matchSeg)}]').classList.contains('annotated') };
     d.querySelector('.keep-btn').click();
-    await until(() => { const x = document.querySelector('.drawer[data-drawer=${JSON.stringify(mismatchSeg)}]'); return x && x.querySelector('details.evidence'); });
+    await until(() => { const x = document.querySelector('.drawer[data-drawer=${JSON.stringify(mismatchSeg)}]'); return x && x.querySelector('.kept-note'); });
     d = document.querySelector('.drawer[data-drawer=${JSON.stringify(mismatchSeg)}]');
-    await until(() => document.querySelector('.seg[data-seg=${JSON.stringify(mismatchSeg)}]').classList.contains('annotated'), 5000);
+    await wait(1500);  // a poll later: still nothing unlocked
     out.afterKeep = { details: !!d.querySelector('details.evidence'), stillAsks: !!d.querySelector('.target-ask'),
+      keptNote: d.querySelector('.kept-note') ? d.querySelector('.kept-note').textContent : null,
       annotated: document.querySelector('.seg[data-seg=${JSON.stringify(mismatchSeg)}]').classList.contains('annotated') };
     d.querySelector('.rerecord-btn').click();
     await until(() => R.controller.state === 'CAPTURING');

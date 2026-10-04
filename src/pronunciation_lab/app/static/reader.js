@@ -409,7 +409,12 @@
         await post(`/api/sessions/${S.sessionId}/attempts/${a.id}/compare`, {});
         for (let i = 0; i < 240; i++) {
           const res = await fetch(`/api/sessions/${S.sessionId}/attempts/${a.id}/comparison`);
-          if (res.ok) { R.renderComparison(box, await res.json()); return; }
+          if (res.ok) {
+            const cmp = await res.json();
+            R.renderComparison(box, cmp);
+            if (cmp.fluency) window.ReaderFeedback.renderFluencyComparison(box, cmp.fluency);
+            return;
+          }
           const body = await res.json().catch(() => ({}));
           if (!body.error || body.error.code !== "comparison_pending") {
             throw new Error((body.error && body.error.message) || `HTTP ${res.status}`);

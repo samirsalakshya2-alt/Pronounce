@@ -229,6 +229,11 @@ sentences:
 * *1 sentence in the feedback below · 2 withheld because the sentence boundary was uncertain · 2 waiting for
   you to keep or re-record* — what the pronunciation, connected-speech and fluency feedback covers.
 
+**Fluency in the summary (sum-3).** Below pronunciation and connected speech, a "Fluency" section gives one
+line built from the summarised sentences only. It has the number of fluency things to notice and in how many
+sentences, what recurs across sentences, and the range of speech rates. Up to three ▶ moments follow, each
+playing an exact window with its stated context. It is never a score; see `docs/M8_FLUENCY_DISFLUENCY.md`.
+
 **MATCH + BOUNDARY_UNCERTAIN** is a valid state: "Your reading appears to match this sentence, but I couldn't
 safely determine where it ended."
 

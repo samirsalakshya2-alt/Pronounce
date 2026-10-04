@@ -1,5 +1,6 @@
 """M12 phase 9: the single-session reading summary (fake engines)."""
 
+import pytest
 from readerhelpers import new_session, record
 
 from pronunciation_lab.reader import model as M
@@ -33,26 +34,29 @@ def test_summary_uses_one_eligible_attempt_per_sentence(reader):
     assert validate_summary(sm, reader.store) == []
 
 
-def test_target_mismatch_is_excluded_unless_the_user_keeps_it(reader, monkeypatch):
-    calls = {"n": 0}
-
-    def fake_target(result):
-        calls["n"] += 1
-        return {"state": "MISMATCH" if calls["n"] == 1 else "MATCH", "reason": "test"}
-
-    monkeypatch.setattr(reader_service, "confirm_target", fake_target)
+@pytest.mark.parametrize("state, reason_unkept, included_when_kept", [
+    ("MATCH", None, True),
+    ("LIKELY_MATCH", None, True),                                       # a probable reading needs no Keep
+    ("AMBIGUOUS", "could not confirm it is this sentence — keep it to include it", True),
+    ("MISMATCH", "appears to contain a different sentence", False),   # Keep preserves; never unsafe feedback
+])
+def test_identity_and_keep_decide_summary_inclusion(reader, monkeypatch, state, reason_unkept, included_when_kept):
+    monkeypatch.setattr(reader_service, "confirm_target",
+                        lambda result, alternatives=None: {"state": state, "reason": "test"})
     sid, art, _ = new_session(reader, TEXT4)
     a1, _ = record(reader, sid, art["segments"][0])
-    a2, _ = record(reader, sid, art["segments"][1], start=48000)
     sm = finish(reader, sid)["summary"]
-    assert [i["attempt_id"] for i in sm["inputs"]] == [a2]
-    assert sm["coverage"]["not_included"] == [{"segment_id": art["segments"][0]["id"], "sentence": 1,
-                                               "reason": "may not match the sentence"}]
-    reader.set_disposition(sid, a1, "kept")                  # the user confirms it is this sentence
+    if reason_unkept is None:
+        assert [i["attempt_id"] for i in sm["inputs"]] == [a1]
+    else:
+        assert sm["inputs"] == [] and sm["coverage"]["not_included"][0]["reason"] == reason_unkept
+    reader.set_disposition(sid, a1, "kept")
     reader.session_action(sid, "resume")
     sm = finish(reader, sid)["summary"]
-    assert sorted(i["attempt_id"] for i in sm["inputs"]) == sorted([a1, a2])
-    assert next(i for i in sm["inputs"] if i["attempt_id"] == a1)["target"] == "MISMATCH"
+    assert ([i["attempt_id"] for i in sm["inputs"]] == [a1]) is included_when_kept
+    # whatever the decision, the recording and its audio stay stored
+    assert reader.store.audio_path(sid, a1, "original.wav").is_file()
+    assert reader.attempt_detail(sid, a1)["attempt"]["user_disposition"] == "kept"
 
 
 def test_failed_and_comparison_results_are_never_summarised(reader, engines):
@@ -99,15 +103,24 @@ def test_reading_on_after_the_summary_marks_it_stale(reader):
 def test_eligibility_rules():
     att = {"user_disposition": None, "state": "ANALYZED"}
     job = {"state": "SUCCEEDED", "engine_id": "e", "target_confirmation": {"state": "MATCH"}, "kind": "primary"}
+    kept = att | {"user_disposition": "kept"}
     assert eligibility(att, job, "e") is None
     assert eligibility(att, job, "other") == "analysed by another engine"
     assert eligibility(att | {"state": "TOO_SHORT"}, job, "e") == "not analysed"
     assert eligibility(att, None, "e") == "not analysed"
-    for tc in ("AMBIGUOUS", "MISMATCH", "NOT_CHECKED", "NOT_APPLICABLE"):
-        assert eligibility(att, job | {"target_confirmation": {"state": tc}}, "e") == "may not match the sentence"
-    assert eligibility(att | {"user_disposition": "kept"}, job | {"target_confirmation": {"state": "AMBIGUOUS"}}, "e") is None
-    assert eligibility(att | {"user_disposition": "kept"}, job | {"target_confirmation": {"state": "NOT_CHECKED"}}, "e") \
-        == "may not match the sentence"
+    with_tc = lambda tc: job | {"target_confirmation": {"state": tc}}  # noqa: E731
+    # distinct reasons, never one catch-all
+    assert eligibility(att, with_tc("AMBIGUOUS"), "e") == "could not confirm it is this sentence — keep it to include it"
+    assert eligibility(att, with_tc("LIKELY_MATCH"), "e") is None
+    assert eligibility(att, with_tc("MISMATCH"), "e") == "appears to contain a different sentence"
+    for tc in ("NOT_CHECKED", "NOT_APPLICABLE"):
+        assert eligibility(att, with_tc(tc), "e") == eligibility(kept, with_tc(tc), "e") == "not analysed"
+    # Keep confirms an uncertain identity; it never makes unsafe feedback count
+    assert eligibility(kept, with_tc("AMBIGUOUS"), "e") is None and eligibility(kept, with_tc("LIKELY_MATCH"), "e") is None
+    assert eligibility(kept, with_tc("MISMATCH"), "e") == "appears to contain a different sentence"
+    withheld = job | {"boundary": {"state": "BOUNDARY_UNCERTAIN", "feedback_withheld": True}}
+    assert eligibility(kept, withheld, "e") == "sentence boundary uncertain — recording preserved, feedback withheld"
+    assert eligibility(att | {"user_disposition": "rerecord_requested"}, job, "e") == "marked for re-recording"
 
 
 def test_validator_catches_ineligible_inputs_and_foreign_examples(reader):

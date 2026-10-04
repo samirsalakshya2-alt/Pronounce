@@ -57,9 +57,19 @@ assert.equal(F.fluencyLine({ state: "ok", notice: 0 }), "");
 assert.equal(F.fluencyLine({ state: "ok", notice: 1 }), "1 fluency thing to notice");
 assert.equal(F.fluencyLine({ state: "ok", notice: 2 }), "2 fluency things to notice");
 assert.equal(F.rateText({ rate_available: false, rate_unavailable_reason: "too short to measure a rate (2 syllables)" }),
-  "Speaking rate: not measured — too short to measure a rate (2 syllables).");
-assert.equal(F.rateText({ rate_available: true, speaking_rate: 2.94, articulation_rate: 3.51, pause_count: 1, pause_total_ms: 890 }),
-  "Speaking rate: 2.9 syllables per second · 3.5 without pauses · 1 pause (0.9 s)");
+  "Speech rate: not measured — too short to measure a rate (2 syllables).");
+assert.equal(F.rateText({ rate_available: true, speaking_rate: 2.94, articulation_rate: 3.51, pause_count: 1, pause_total_ms: 890,
+  articulation_available: true }),
+  "Speech rate: 2.9 syllables per second · articulation rate 3.5 (without pauses) · 1 pause (0.9 s)");
+// pauses not verified as silence: no articulation rate, no pause total presented as fact
+assert.equal(F.rateText({ rate_available: true, speaking_rate: 1.81, articulation_rate: null, pause_count: 10, pause_total_ms: 6200,
+  articulation_available: false, articulation_unavailable_reason: "pauses could not be checked" }),
+  "Speech rate: 1.8 syllables per second · articulation rate not measured — pauses could not be checked.");
+// exact interval and stated context for Listen
+const lo = { start_ms: 2880, end_ms: 4380, playback: { span_ms: [2880, 4380], play_ms: [2630, 4630], context_ms: [250, 250] } };
+assert.equal(F.spanText(lo), "2.88–4.38 s");
+assert.equal(F.listenTitle(lo), "Plays 2.88–4.38 s with 0.25 s before and 0.25 s after it for context");
+assert.equal(F.listenTitle({ start_ms: 0, end_ms: 500, playback: { context_ms: [0, 0] } }), "Plays exactly 0.00–0.50 s");
 const flv = { state: "ok", observations: [
   { id: "f1", type: "PAUSE", notice: false, observed: "0.69 s pause", context: { position: "at a phrase boundary", word_before: "it", word_after: "then" } },
   { id: "f2", type: "PAUSE", notice: true, observed: "0.89 s pause", context: { position: "between words inside a phrase", word_before: "then", word_after: "change" } },

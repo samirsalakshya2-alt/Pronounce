@@ -184,3 +184,12 @@ button.stop { color: var(--rec); border-color: color-mix(in srgb, var(--rec) 40%
   .article h1 { font-size: 2rem; }
   .body { font-size: 1.15rem; }
 }
+
+/* M8: fluency — a separate, quiet section in Details */
+.drawer .fluency { margin-top: 8px; }
+.fluency-list { list-style: none; padding: 0; margin: 6px 0; }
+.fluency-item { margin: 4px 0; }
+.fluency-item .fl-label { font-weight: 600; }
+.fluency-summary, .fluency-rate { margin: 6px 0; }
+.listen-fluency, .listen-fluency-continued { font: inherit; color: var(--accent); background: none; border: 0; padding: 0 2px; cursor: pointer; }
+.fluency-compare { margin-top: 8px; }

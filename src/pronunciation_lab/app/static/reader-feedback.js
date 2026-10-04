@@ -125,10 +125,24 @@ function fluencyLine(compact) {
 }
 
 function rateText(m) {
-  if (!m) return "Speaking rate: not measured.";
-  if (!m.rate_available) return `Speaking rate: not measured — ${m.rate_unavailable_reason}.`;
+  if (!m) return "Speech rate: not measured.";
+  if (!m.rate_available) return `Speech rate: not measured — ${m.rate_unavailable_reason}.`;
+  const speech = `Speech rate: ${m.speaking_rate.toFixed(1)} syllables per second`;
+  // articulation rate needs pauses verified as silence (older stored results have no flag: available)
+  if (m.articulation_available === false) return `${speech} · articulation rate not measured — ${m.articulation_unavailable_reason}.`;
   const pauses = m.pause_count ? ` · ${m.pause_count} pause${m.pause_count === 1 ? "" : "s"} (${(m.pause_total_ms / 1000).toFixed(1)} s)` : " · no pauses";
-  return `Speaking rate: ${m.speaking_rate.toFixed(1)} syllables per second · ${m.articulation_rate.toFixed(1)} without pauses${pauses}`;
+  return `${speech} · articulation rate ${m.articulation_rate.toFixed(1)} (without pauses)${pauses}`;
+}
+
+/** The exact interval of one observation, and what its Listen control plays around it. */
+function spanText(o) {
+  return `${(o.start_ms / 1000).toFixed(2)}–${(o.end_ms / 1000).toFixed(2)} s`;
+}
+
+function listenTitle(o) {
+  const c = (o.playback && o.playback.context_ms) || [0, 0];
+  if (!c[0] && !c[1]) return `Plays exactly ${spanText(o)}`;
+  return `Plays ${spanText(o)} with ${(c[0] / 1000).toFixed(2)} s before and ${(c[1] / 1000).toFixed(2)} s after it for context`;
 }
 
 /** What the Details section lists: things to notice first; everything else under "Other timing". */
@@ -149,7 +163,7 @@ const STRENGTH_TEXT = { moderate: "evidence: moderate", low: "evidence: low", am
 
 if (typeof module !== "undefined") {
   module.exports = { feedbackLine, displayAttempt, primaryJob, TARGET_TEXT, NOTE_IDENTITY, identityOf, sentencesText, boundaryNote, BOUNDARY_TEXT,
-    otherBoundary, fluencyLine, rateText, fluencyItems, fluencyItemText, STRENGTH_TEXT, readingLines,
+    otherBoundary, fluencyLine, rateText, fluencyItems, fluencyItemText, STRENGTH_TEXT, readingLines, spanText, listenTitle,
     boundaryPlainText, BOUNDARY_CONFIDENCE_TEXT };
 }
 
@@ -555,21 +569,25 @@ if (typeof document !== "undefined") {
     }
     sec.append(el("p", { class: "fluency-summary", text: fl.summary.text }));
     const listen = (o, label) => el("button", { type: "button", class: "listen-fluency", "data-id": o.id, text: label || "▶ Listen",
+      title: listenTitle(o), "aria-label": `Listen: ${o.label}, ${listenTitle(o)}`,
       onclick: (ev) => playRef(S, refFor(a, job, o.playback.play_ms, "fluency:" + o.type), ev.target) });
+    const at = (o) => el("span", { class: "muted small fl-time", text: `at ${spanText(o)}` });
     const list = el("ul", { class: "fluency-list" });
     for (const o of items.notice) {
       list.append(el("li", { class: "fluency-item", "data-type": o.type }, [
         el("span", { class: "fl-label", text: o.label }), " ",
-        el("span", { class: "fl-observed", text: fluencyItemText(o) }), " ",
+        el("span", { class: "fl-observed", text: fluencyItemText(o) }), " ", at(o), " ",
         listen(o), " ", el("span", { class: "muted small", text: STRENGTH_TEXT[o.strength] || "" })]));
     }
     if (items.notice.length) sec.append(list);
+    if (items.notice.length) sec.append(el("p", { class: "muted small fluency-listen-note",
+      text: "Each ▶ Listen plays the moment with a little context before and after it; the exact times are shown." }));
     sec.append(el("p", { class: "fluency-rate", text: rateText(fl.metrics) }));
     if (items.other.length) {
       const other = el("details", { class: "fluency-other" }, [el("summary", { text: `Other timing (${items.other.length})` })]);
       const ul = el("ul", { class: "fluency-list" });
       for (const o of items.other) ul.append(el("li", { class: "fluency-item", "data-type": o.type }, [
-        el("span", { class: "fl-label", text: o.label }), " ", el("span", { class: "fl-observed", text: fluencyItemText(o) }), " ", listen(o)]));
+        el("span", { class: "fl-label", text: o.label }), " ", el("span", { class: "fl-observed", text: fluencyItemText(o) }), " ", at(o), " ", listen(o)]));
       other.append(ul);
       sec.append(other);
     }
@@ -742,6 +760,23 @@ if (typeof document !== "undefined") {
           exampleButtons(S, r.examples),
         ]));
       }
+      box.append(sec);
+    }
+    const flu = sum.fluency;
+    if (flu && flu.sentences_analysed) {
+      // M8: secondary to the article and to pronunciation — one line, what recurs, at most three moments to hear
+      const sec = el("section", { class: "summary-group", "data-group": "fluency" }, [el("h3", { text: "Fluency" }),
+        el("p", { class: "summary-fluency", text: flu.text })]);
+      if (flu.examples.length) {
+        const row = el("div", { class: "row examples" });
+        for (const ref of flu.examples) {
+          const title = listenTitle({ start_ms: ref.span_ms[0], end_ms: ref.span_ms[1], playback: { context_ms: ref.context_ms } });
+          row.append(el("button", { type: "button", class: "play-example play-fluency", "data-attempt": ref.attempt_id,
+            title, text: `▶ Sentence ${ref.sentence} · ${ref.label} (${ref.observed})`, onclick: (ev) => playRef(S, ref, ev.target) }));
+        }
+        sec.append(row);
+      }
+      sec.append(el("p", { class: "muted small", text: "Counts of moments to listen to, not a judgement of the reading: pauses and repeats can be natural or intentional." }));
       box.append(sec);
     }
     if (sum.practise.length) {

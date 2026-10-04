@@ -28,7 +28,7 @@ from pronunciation_lab.app.practice import GUIDANCE_NOTE, guidance
 from pronunciation_lab.reader import model as M
 from pronunciation_lab.reader.status import attempt_status
 
-SUMMARY_VERSION = "sum-2"
+SUMMARY_VERSION = "sum-3"  # sum-3: adds the M8 fluency aggregate
 MAX_EXAMPLES = 3
 SUMMARY_CAVEATS = [
     "This summarises one reading. It describes what the listening model heard, not a fixed trait.",
@@ -152,6 +152,7 @@ def build_summary(store, session: dict[str, Any], article: dict[str, Any]) -> di
     reduction_out = [v | {"explanations": list(v["explanations"].values())} for v in reductions.values()]
 
     readable = [s for s in article["segments"] if s["readable"]]
+    fluency = fluency_summary(store, used, seg_index)
     return {
         "version": SUMMARY_VERSION,
         "session_id": sid,
@@ -175,8 +176,89 @@ def build_summary(store, session: dict[str, Any], article: dict[str, Any]) -> di
         "groups": [g for g in group_out if g["pattern_ids"]],
         "practise": practise,
         "reductions": reduction_out,
+        "fluency": fluency,
         "caveats": SUMMARY_CAVEATS,
     }
+
+
+# M8 in the reading summary: counts of things to notice, what recurs across sentences, a few examples to
+# hear, and the range of speech rates — never a score, a ranking or an average "fluency" figure.
+FLUENCY_GROUPS = (("LONG_PAUSE", "long pause", "long pauses"),
+                  ("PAUSE", "possible hesitation pause", "possible hesitation pauses"),
+                  ("FILLER", "possible filler", "possible fillers"),
+                  ("REPETITION", "possible repetition", "possible repetitions"),
+                  ("RESTART", "possible restart", "possible restarts"),
+                  ("FALSE_START", "possible false start", "possible false starts"),
+                  ("OTHER_HESITATION", "possible hesitation", "possible hesitations"),
+                  ("RATE_ANOMALY", "change of pace", "changes of pace"))
+FLUENCY_EXAMPLES = 3
+STRENGTH_ORDER = {"moderate": 0, "low": 1, "ambiguous": 2, "insufficient": 3}
+
+
+def _fluency_group(o: dict[str, Any]) -> str:
+    return "LONG_PAUSE" if o["type"] == "PAUSE" and o.get("classification") == "unusually_long" else o["type"]
+
+
+def fluency_summary(store, used, seg_index) -> dict[str, Any]:
+    """Aggregate the M8 layer of the attempts included in the summary (the same sentence-only analyses that
+    M4/M5 use: a withheld or excluded attempt contributes nothing)."""
+    counts: dict[str, int] = {}
+    where: dict[str, set[int]] = {}
+    examples, rates, analysed = [], [], 0
+    for a, job in used:
+        fl = store.load_view(job).get("fluency") or {}
+        if fl.get("state") != "ok":
+            continue
+        analysed += 1
+        sentence = seg_index[a["segment_id"]] + 1
+        m = fl.get("metrics") or {}
+        if m.get("rate_available") and m.get("speaking_rate") is not None:
+            rates.append((m["speaking_rate"], sentence))
+        for o in fl.get("observations") or []:
+            if not o.get("notice"):
+                continue
+            g = _fluency_group(o)
+            counts[g] = counts.get(g, 0) + 1
+            where.setdefault(g, set()).add(sentence)
+            examples.append((STRENGTH_ORDER.get(o["strength"], 9), -o["duration_ms"], sentence, a, job, o))
+    examples.sort(key=lambda x: x[:3])
+    names = {g: (one, many) for g, one, many in FLUENCY_GROUPS}
+    kinds = [{"kind": g, "label": names[g][0] if counts[g] == 1 else names[g][1], "count": counts[g],
+              "sentences": sorted(where[g])} for g, _, _ in FLUENCY_GROUPS if counts.get(g)]
+    recurring = [k for k in kinds if len(k["sentences"]) >= 2]
+    notice = sum(counts.values())
+    out = {
+        "engine_note": "From each included sentence's own analysis; continued speech after a sentence is never counted.",
+        "sentences_analysed": analysed,
+        "notice": notice,
+        "sentences_with_notice": len(set().union(*where.values())) if where else 0,
+        "kinds": kinds,
+        "recurring": [{"kind": k["kind"], "label": k["label"], "sentences": k["sentences"]} for k in recurring],
+        "examples": [M.playback_reference(a, job, o["playback"]["play_ms"], o["playback"]["span_ms"], "fluency")
+                     | {"sentence": sentence, "label": o["label"], "observed": o["observed"], "strength": o["strength"],
+                        "context_ms": o["playback"].get("context_ms")}
+                     for _, _, sentence, a, job, o in examples[:FLUENCY_EXAMPLES]],
+        "speech_rate": ({"min": min(r for r, _ in rates), "max": max(r for r, _ in rates), "sentences": len(rates),
+                         "unit": "syllables per second"} if rates else None),
+    }
+    out["text"] = fluency_text(out)
+    return out
+
+
+def fluency_text(f: dict[str, Any]) -> str:
+    if not f["sentences_analysed"]:
+        return "No fluency evidence among the sentences included."
+    n, s = f["notice"], f["sentences_analysed"]
+    parts = [f"{n} fluency thing{'s' if n != 1 else ''} to notice in {f['sentences_with_notice']} of {s} "
+             f"sentence{'s' if s != 1 else ''}" if n else f"Nothing stood out in the timing of {s} "
+             f"sentence{'s' if s != 1 else ''}"]
+    for r in f["recurring"]:
+        parts.append(f"{r['label']} in {len(r['sentences'])} sentences")
+    sr = f["speech_rate"]
+    if sr:
+        parts.append(f"speech rate {sr['min']:.1f} syllables per second" if abs(sr["max"] - sr["min"]) < 0.05 else
+                     f"speech rate {sr['min']:.1f}–{sr['max']:.1f} syllables per second")
+    return " · ".join(parts) + "."
 
 
 def validate_summary(summary: dict[str, Any], store) -> list[str]:
@@ -193,14 +275,16 @@ def validate_summary(summary: dict[str, Any], store) -> list[str]:
     if len({i["segment_id"] for i in summary["inputs"]}) != len(summary["inputs"]):
         issues.append("more than one attempt per sentence")
     examples = [e for p in summary["patterns"] for e in p["examples"]] + \
-               [e for r in summary["reductions"] for e in r["examples"]]
+               [e for r in summary["reductions"] for e in r["examples"]] + \
+               [e for e in (summary.get("fluency") or {}).get("examples", [])]
     for e in examples:
         src = included.get(e["attempt_id"])
         if src is None or src["job_id"] != e["job_id"] or e["timeline"] != M.PLAYBACK_TIMELINE:
             issues.append(f"example from {e['attempt_id']} is not an included attempt's primary analysis")
         if not e["play_ms"] or e["play_ms"][0] >= e["play_ms"][1]:
             issues.append(f"example from {e['attempt_id']} has no exact playback window")
-    text = " ".join([*(p["summary"] for p in summary["patterns"]), *(r["label"] for r in summary["reductions"])]).lower()
+    text = " ".join([*(p["summary"] for p in summary["patterns"]), *(r["label"] for r in summary["reductions"]),
+                     (summary.get("fluency") or {}).get("text", "")]).lower()
     for banned in ("score", "wrong", "incorrect", "worst", "best", "rank"):
         if banned in text:
             issues.append(f"judgemental wording ({banned})")

@@ -56,8 +56,11 @@ def test_target_confirmation_uses_no_speech_recognition():
     tree = ast.parse(inspect.getsource(T))
     imported = {(n.module or "") for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)} | \
                {a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
-    assert imported <= {"__future__", "typing", "pronunciation_lab.benchmark.analysis", "pronunciation_lab.benchmark.schema"}
+    # tc-2 adds eSpeak grapheme-to-phoneme of known sentences (phonemizer) and stdlib helpers — no engine module
+    assert imported <= {"__future__", "typing", "pronunciation_lab.benchmark.analysis", "pronunciation_lab.benchmark.schema",
+                        "phonemizer", "phonemizer.separator", "functools", "hashlib", "random", "re", "unicodedata"}
+    assert not any(m.startswith("pronunciation_lab.benchmark.engines") for m in imported)
     src = inspect.getsource(T).lower()
     for word in ("transformers", "whisper", "transcri", "asr", "960h", "create_engine"):
         assert word not in src.replace("never based on free speech\nrecognition", ""), word
-    assert list(inspect.signature(T.confirm_target).parameters) == ["result"]
+    assert list(inspect.signature(T.confirm_target).parameters) == ["result", "alternatives"]

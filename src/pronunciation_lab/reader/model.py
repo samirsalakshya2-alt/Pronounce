@@ -210,6 +210,6 @@ def segment_state(attempts: list[dict[str, Any]], jobs: dict[str, dict[str, Any]
         return "NEEDS_ATTENTION"
     primary = next((jobs[j] for j in latest["job_ids"] if j in jobs and jobs[j]["kind"] == "primary"), None)
     target = (primary or {}).get("target_confirmation", {}).get("state")
-    if target in ("AMBIGUOUS", "MISMATCH"):
+    if target in ("AMBIGUOUS", "MISMATCH") and latest.get("user_disposition") != "kept":
         return "NEEDS_ATTENTION"
     return "FEEDBACK_READY"

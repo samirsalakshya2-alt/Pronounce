@@ -44,7 +44,7 @@ def heard(phones: str, start_ms: float, step_ms: float = 80.0, dur_ms: float = 6
     return out
 
 
-def make(words=SENTENCE, decoded=(), *, engine="wav2vec2_raw", status="ok", duration_ms=None):
+def make(words=SENTENCE, decoded=(), *, engine="wav2vec2_raw", status="ok", duration_ms=None, text=None):
     """A PronunciationResult as a CTC engine would assemble it from `decoded` [(phone, start_ms, end_ms)]."""
     groups = [p.split() for _, p in words]
     flat = [p for g in groups for p in g]
@@ -94,7 +94,7 @@ def make(words=SENTENCE, decoded=(), *, engine="wav2vec2_raw", status="ok", dura
         status=status,
         recording=RecordingInfo(id="m7", audio=RecordingAudio(original_path="m7.wav", analysis_path="m7.wav", sample_rate_hz=SR,
                                                                  channels=1, duration_ms=dur),
-                                target=TargetInfo(text=" ".join(w for w, _ in words))),
+                                target=TargetInfo(text=text if text is not None else " ".join(w for w, _ in words))),
         engine=EngineInfo(name=engine, version="1", mode="local", model="test"),
         processing=ProcessingInfo(device="cpu"),
         phone_set="test",
