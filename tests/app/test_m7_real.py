@@ -392,4 +392,100 @@ def test_kept_wrong_sentence_without_a_defensible_boundary(m7real, engine):
     assert view["state"] == "boundary_withheld" and view["message"] == B.WITHHELD_MESSAGE and not view["words"]
     reader.session_action(sid, "finish")
     sm = reader.summary(sid)
-    assert sm["inputs"] == [] and sm["coverage"]["not_included"][0]["reason"] == "sentence boundary uncertain"
+    # identity is the more fundamental reason: a different sentence (and its boundary is withheld as well)
+    assert sm["inputs"] == [] and sm["coverage"]["not_included"][0]["reason"] == "appears to contain a different sentence"
+
+
+# ----------------------------------------------------------------------
+# M7 boundary-confidence correction: a sentence decoded poorly as a whole, with a clear pause before the
+# continuation (the real manual-test case: 44.9 s, cut 41.33 s, whole-recording cost 0.548). The pause marks
+# the end, so the sentence is isolated and analysed on its own; poor decoding no longer vetoes the boundary.
+# Analog from the benchmark: the first 60 % of the sentence masked by noise, the end clear, 1 s of the
+# recording's own room tone, then another sentence.
+# ----------------------------------------------------------------------
+
+def _masked_then_continued(rid, other, engine, frac=0.6, gain_db=0.0):
+    x, _ = sf.read(DATA_DIR / "benchmark_wav" / f"{rid}.wav", dtype="float32")
+    fr = load_frozen(rid, engine, DATA_DIR)
+    ph = [p for w in fr.words for p in w.phonemes if p.timing.start_ms is not None
+          and p.engine_evidence.get("operation") != "omission"]
+    s0, e0 = ph[0].timing.start_ms, ph[-1].timing.end_ms
+    head = x[: int((e0 + 60) * 16)].copy()
+    a, b = int(s0 * 16), int((s0 + (e0 - s0) * frac) * 16)
+    rms = np.sqrt(np.mean(head[a:int(e0 * 16)] ** 2))
+    head[a:b] += (np.random.default_rng(1).standard_normal(b - a) * rms * 10 ** (gain_db / 20)).astype(np.float32)
+    tone = x[: int(max(60, s0 - 80) * 16)]
+    pause = np.tile(tone, int(np.ceil(16000 / len(tone))))[:16000]
+    y, _ = sf.read(DATA_DIR / "benchmark_wav" / f"{other}.wav", dtype="float32")
+    os0 = min(p.timing.start_ms for w in load_frozen(other, engine, DATA_DIR).words for p in w.phonemes
+              if p.timing.start_ms is not None)
+    cont = y[int((os0 - 40) * 16):int((os0 + 2500) * 16)]
+    x = np.concatenate([head, pause, cont])
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(16000)
+        w.writeframes((np.clip(x, -1, 1) * 32767).astype("<i2").tobytes())
+    return buf.getvalue(), len(x), e0 + 60, len(head) * 1000.0 / 16000 + 1000.0
+
+
+def _through_reader(reader, engine, rid, other, **kw):
+    man = manifest(DATA_DIR)
+    data, n, sentence_end, cont_start = _masked_then_continued(rid, other, engine, **kw)
+    art = reader.create_article(f"{man[rid]['target_text']} {man[other]['target_text']}", f"M7 masked {rid}")
+    sid = M.new_id()
+    reader.create_session(sid, art["id"], engine)
+    aid = M.new_id()
+    reader.upload_audio(sid, aid, data, {"segment_id": art["segments"][0]["id"], "run_id": M.new_id(),
+                                         "sample_rate": 16000, "start_sample": 0, "end_sample": n, "end_reason": "stopped"})
+    assert reader.worker.wait_idle(180)
+    detail = reader.attempt_detail(sid, aid)
+    [job] = detail["jobs"]
+    return sid, aid, art, job, detail["views"].get(job["id"]), sentence_end, cont_start
+
+
+@pytest.mark.parametrize("engine", ENGINES)
+@pytest.mark.parametrize("rid, other", [("R19", "R11"), ("R14", "R02")])
+def test_poorly_decoded_sentence_with_a_clear_pause_is_isolated(m7real, engine, rid, other):
+    reader, _, _ = m7real
+    sid, aid, art, job, view, sentence_end, cont_start = _through_reader(reader, engine, rid, other)
+    b = reader.store.load_boundary(job)
+    # the old rule would have withheld it: the whole recording is decoded poorly
+    assert b["evidence"]["alignment_cost_per_sound"] > B.MAX_DEFENSIBLE_COST
+    # boundary confidence comes from the pause around the cut
+    assert b["boundary_confidence"] == "supported" and b["relied_on_local_support"] and b["defensible"]
+    assert b["state"] == "TARGET_PLUS_OVERFLOW" and b["target_analysed"] and not b["feedback_withheld"]
+    assert sentence_end - 150 <= b["cut_ms"] <= cont_start, (b["cut_ms"], sentence_end, cont_start)
+    assert b["target_check"]["issues"] == []
+    # the sentence-only analysis is the one shown, and it is contained in the sentence
+    assert reader.store.job_file(job, "target.wav").is_file() and reader.store.job_file(job, "target_result.json").is_file()
+    assert b["containment"]["checked"] and b["containment"]["ok"]
+    from pronunciation_lab.benchmark.schema import PronunciationResult
+    tres = PronunciationResult.model_validate_json(reader.store.job_file(job, "target_result.json").read_text())
+    assert B.evidence_outside_target(view, tres, b["cut_ms"]) == []
+    spans = tres.engine_evidence["recognition"]["frame_spans"]
+    assert all(s[1] * 20 <= b["cut_ms"] + 1 for s in spans)          # no continuation sound in the sentence's result
+    assert all(o["span_ms"][1] <= b["cut_ms"] + 1 for o in view["coach"]["observations"] if o.get("span_ms"))
+    assert all(c["where"]["span_ms"][1] <= b["cut_ms"] + 1 for c in view["reduction"]["candidates"])
+    assert all(o["end_ms"] <= b["cut_ms"] for o in view["fluency"]["observations"])
+    assert view["state"] == "ok" and view["analysis_confidence"]["state"] in ("ok", "low_confidence")
+    # the continuation is kept and playable on its own
+    [cs] = view["fluency"]["continued_speech"]
+    assert cs["start_ms"] == b["cut_ms"] and cs["decoded_sounds"] >= B.MIN_OVERFLOW_PHONES
+    status = next(a for a in reader.snapshot(sid)["attempts"] if a["id"] == aid)["status"]
+    assert status["feedback"] == "shown" and "could not be separated" not in status["message"]
+
+
+@pytest.mark.parametrize("engine", ENGINES)
+def test_no_clear_pause_keeps_the_heavy_noise_protection(m7real, engine):
+    """R17 masked: the decoder finds sound inside the pause — local support is refused, and with the whole
+    recording decoded poorly the old protection still withholds (no isolation on a doubtful cut)."""
+    reader, _, _ = m7real
+    sid, aid, art, job, view, sentence_end, cont_start = _through_reader(reader, engine, "R17", "R05")
+    b = reader.store.load_boundary(job)
+    assert b["boundary_confidence"] == "insufficient" and not b["defensible"]
+    assert "no pause before the continued speech" in b["evidence"]["boundary_support"]["failed"]
+    assert b["feedback_withheld"] and b["withheld_reason"] == "boundary" and not b["target_analysed"]
+    assert b["containment"]["checked"] is False and not any("lay outside" in r for r in b["reasons"])
+    assert view["state"] == "boundary_withheld" and view["message"] == B.WITHHELD_MESSAGE

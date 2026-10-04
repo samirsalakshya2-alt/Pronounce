@@ -30,10 +30,29 @@ function primaryJob(attempt, jobs) {
   return primaries.length ? primaries[primaries.length - 1] : null;
 }
 
+// Identity (is this the sentence?) is shown separately from the boundary and from feedback safety; the
+// server's attempt.status carries the decision and its wording (reader/status.py). These are fallbacks.
 const TARGET_TEXT = {
-  AMBIGUOUS: "This recording may not match the sentence (for example, part of it was skipped or another sentence was read).",
-  MISMATCH: "This recording does not seem to be this sentence, so no pronunciation feedback is shown.",
+  MATCH: "Recording appears to match this sentence.",
+  LIKELY_MATCH: "This recording is probably this sentence (it fits it best of the article's sentences), but the evidence is weak.",
+  AMBIGUOUS: "I couldn't confidently tell whether this recording is this sentence.",
+  MISMATCH: "This recording appears to contain a different sentence.",
+  TOO_SHORT: "Recording is too short to confirm the sentence.",
+  FAILED: "Recording could not be analysed.",
 };
+const NOTE_IDENTITY = { AMBIGUOUS: "couldn't confirm the sentence", LIKELY_MATCH: "probably this sentence",
+  MISMATCH: "appears to be a different sentence" };
+
+/** The identity/feedback decision for one attempt; "kept" from the attempt itself (it changes on click). */
+function identityOf(a, job) {
+  const st = (a && a.status) || {};
+  const identity = st.identity || (job && job.target_confirmation ? job.target_confirmation.state : null);
+  const kept = !!a && a.user_disposition === "kept";
+  const feedback = st.feedback || (identity === "MISMATCH" ? "hidden_identity" : "shown");
+  return { identity, kept, feedback, message: st.message || TARGET_TEXT[identity] || "",
+    needsDecision: ["AMBIGUOUS", "MISMATCH"].includes(identity) && !kept
+      && !["discarded", "rerecord_requested"].includes(a && a.user_disposition) };
+}
 
 // M7: what the reader says about speech that continued after the sentence (never a warning or a score)
 const BOUNDARY_TEXT = {
@@ -66,8 +85,72 @@ function boundaryNote(boundary) {
   return { state, ...BOUNDARY_TEXT[state], after, target, withheld: !!boundary.feedback_withheld };
 }
 
+/** M7: how the end of the sentence was established (boundary confidence is separate from analysis quality). */
+const BOUNDARY_CONFIDENCE_TEXT = {
+  supported: "by the pause and the continued speech around it",
+  clear_recording: "by the decoded sentence (the recording was decoded clearly enough)",
+  insufficient: "not established: no clear pause, and the recording was decoded unclearly",
+};
+
+/** The Details sentence for a boundary: genuinely unknown end, analysis not contained, or the usual text. */
+function boundaryPlainText(b, plain) {
+  if (b.feedback_withheld && b.withheld_reason === "containment") {
+    return "The sentence was separated from the speech that followed (listen to each part below), but part of its analysis fell outside the sentence, so none of it is shown. The recording is kept.";
+  }
+  if (b.feedback_withheld) {
+    return "Where this sentence ends could not be established, and speech seems to continue after it. No pronunciation feedback is shown for this recording; the recording is kept.";
+  }
+  return plain;
+}
+
+/** The reading summary's two lines: what was read and identified, then what feedback covers. */
+function readingLines(cov) {
+  const n = (k, one, many) => `${k} ${k === 1 ? one : many}`;
+  const first = [`${cov.recorded ?? cov.read} of ${n(cov.sentences, "sentence", "sentences")} recorded`];
+  if (cov.identified) first.push(`${cov.identified} identified`);
+  if (cov.uncertain) first.push(`${cov.uncertain} uncertain`);
+  if (cov.different) first.push(`${cov.different} ${cov.different === 1 ? "seems" : "seem"} to be a different sentence`);
+  const second = [`${n(cov.feedback_included ?? cov.included, "sentence", "sentences")} in the feedback below`];
+  if (cov.feedback_low_confidence) second.push(`${cov.feedback_low_confidence} with uncertain pronunciation evidence`);
+  if (cov.feedback_withheld) second.push(`${cov.feedback_withheld} withheld because the sentence boundary was uncertain`);
+  if (cov.feedback_withheld_containment) second.push(`${cov.feedback_withheld_containment} withheld because part of the analysis fell outside the sentence`);
+  if (cov.awaiting_decision) second.push(`${cov.awaiting_decision} waiting for you to keep or re-record`);
+  return [first.join(" · "), second.join(" · ")];
+}
+
+// M8: fluency — a separate dimension from pronunciation; counts of things to notice, never a score
+function fluencyLine(compact) {
+  if (!compact || compact.state !== "ok" || !compact.notice) return "";
+  return `${compact.notice} fluency thing${compact.notice === 1 ? "" : "s"} to notice`;
+}
+
+function rateText(m) {
+  if (!m) return "Speaking rate: not measured.";
+  if (!m.rate_available) return `Speaking rate: not measured — ${m.rate_unavailable_reason}.`;
+  const pauses = m.pause_count ? ` · ${m.pause_count} pause${m.pause_count === 1 ? "" : "s"} (${(m.pause_total_ms / 1000).toFixed(1)} s)` : " · no pauses";
+  return `Speaking rate: ${m.speaking_rate.toFixed(1)} syllables per second · ${m.articulation_rate.toFixed(1)} without pauses${pauses}`;
+}
+
+/** What the Details section lists: things to notice first; everything else under "Other timing". */
+function fluencyItems(fl) {
+  const obs = (fl && fl.state === "ok" && fl.observations) || [];
+  return { notice: obs.filter((o) => o.notice), other: obs.filter((o) => !o.notice) };
+}
+
+function fluencyItemText(o) {
+  const where = o.context && o.context.word_before && o.context.word_after && o.type === "PAUSE"
+    ? ` (${o.context.position}, after “${o.context.word_before}”)`
+    : (o.context && o.context.position ? ` (${o.context.position})` : "");
+  return `${o.observed}${where}`;
+}
+
+const STRENGTH_TEXT = { moderate: "evidence: moderate", low: "evidence: low", ambiguous: "evidence: ambiguous",
+  insufficient: "evidence: insufficient" };
+
 if (typeof module !== "undefined") {
-  module.exports = { feedbackLine, displayAttempt, primaryJob, TARGET_TEXT, sentencesText, boundaryNote, BOUNDARY_TEXT, otherBoundary };
+  module.exports = { feedbackLine, displayAttempt, primaryJob, TARGET_TEXT, NOTE_IDENTITY, identityOf, sentencesText, boundaryNote, BOUNDARY_TEXT,
+    otherBoundary, fluencyLine, rateText, fluencyItems, fluencyItemText, STRENGTH_TEXT, readingLines,
+    boundaryPlainText, BOUNDARY_CONFIDENCE_TEXT };
 }
 
 // --- browser ----------------------------------------------------------------------------------------
@@ -145,7 +228,7 @@ if (typeof document !== "undefined") {
     if (!a || a.state !== "ANALYZED") return null;
     const job = primaryJob(a, S.snap.jobs);
     if (!job || job.state !== "SUCCEEDED") return null;
-    if (targetOf(job) === "MISMATCH" && a.user_disposition !== "kept") return null; // no feedback by default
+    if (identityOf(a, job).feedback !== "shown") return null; // a different sentence, or feedback withheld
     return { a, job };
   }
 
@@ -260,13 +343,19 @@ if (typeof document !== "undefined") {
     }
     const a = displayAttempt(all);
     const job = primaryJob(a, S.snap.jobs);
-    const tc = targetOf(job);
-    const kept = a.user_disposition === "kept";
+    const idn = identityOf(a, job);
+    const tc = idn.identity;
     let text, cls = "note";
-    if (a.state === "ANALYZED" && tc === "MISMATCH" && !kept) { text = "may not be this sentence"; cls += " attention"; }
+    if (a.state === "ANALYZED" && idn.feedback === "hidden_identity") { text = NOTE_IDENTITY.MISMATCH; cls += " attention"; }
     else if (a.state === "ANALYZED") {
       text = feedbackLine(job && job.feedback);
-      if (tc === "AMBIGUOUS" && !kept) { text += " · may not match"; cls += " attention"; }
+      const fl = fluencyLine(job && job.fluency);
+      if (fl) text += " · " + fl;
+      if (a.status && a.status.analysis_note) text += " · pronunciation evidence uncertain";
+      if (NOTE_IDENTITY[tc] && !idn.kept && idn.feedback === "shown") {
+        text += " · " + NOTE_IDENTITY[tc];
+        if (tc === "AMBIGUOUS") cls += " attention";
+      }
     } else { text = attentionText(a, job) || "needs attention"; cls += " attention"; }
     note.className = cls;
     const open = !!(S.drawers[segId] && !S.drawers[segId].hidden);
@@ -279,10 +368,12 @@ if (typeof document !== "undefined") {
         text: (open ? "▾" : "▸") + " Details", onclick: (e) => { e.stopPropagation(); toggle(S, segId); } }), " ",
       el("button", { type: "button", class: "read-again", title: "Read this sentence again (new recording)",
         "aria-label": "Read again", text: "↻", onclick: (e) => { e.stopPropagation(); window.__readerApi.readAgain(segId); } }));
-    const bn = a.state === "ANALYZED" && !(tc === "MISMATCH" && !kept) ? boundaryNote(job && job.boundary) : null;
+    const bn = a.state === "ANALYZED" && idn.feedback !== "hidden_identity" ? boundaryNote(job && job.boundary) : null;
     if (bn) {
-      const line = el("span", { class: "boundary-note", "data-boundary": bn.state, title: bn.sub || bn.line },
-        [el("span", { class: "boundary-line", text: bn.line })]);
+      // withheld but the reading matches: say so ("appears to match … couldn't determine where it ended")
+      const lineText = bn.withheld && (tc === "MATCH" || tc === "LIKELY_MATCH") ? idn.message : bn.line;
+      const line = el("span", { class: "boundary-note", "data-boundary": bn.state, title: bn.sub || lineText },
+        [el("span", { class: "boundary-line", text: lineText })]);
       if (bn.after && bn.after.play) {
         line.append(" ", el("button", { type: "button", class: "listen-overflow",
           "aria-label": "Listen to the continued speech", text: "▶ Listen",
@@ -309,7 +400,8 @@ if (typeof document !== "undefined") {
 
   /** What a drawer shows; an open drawer is rebuilt only from a pending/attention state. */
   function signature(a, job) {
-    return [a.id, a.state, a.user_disposition || "", job ? job.id : "", job ? job.state : "", targetOf(job) || ""].join("|");
+    return [a.id, a.state, a.user_disposition || "", job ? job.id : "", job ? job.state : "", targetOf(job) || "",
+      (a.status && a.status.identity) || ""].join("|");
   }
 
   function refreshNotes(S) { if (window.__readerApi && window.__readerApi.refresh) window.__readerApi.refresh(); }
@@ -359,9 +451,20 @@ if (typeof document !== "undefined") {
       return;
     }
 
-    const target = targetOf(job) || "NOT_CHECKED";
-    if (target === "AMBIGUOUS" || target === "MISMATCH") {
-      const ask = el("div", { class: "target-ask", "data-target": target }, [el("p", { text: TARGET_TEXT[target] })]);
+    const idn = identityOf(a, job);
+    const target = idn.identity || "NOT_CHECKED";
+    if (idn.kept && ["AMBIGUOUS", "LIKELY_MATCH", "MISMATCH"].includes(target)) {
+      const kn = el("p", { class: "muted small kept-note", "data-target": target, text: target === "MISMATCH"
+        ? "Kept — the recording is preserved. Pronunciation feedback stays hidden because it appears to contain a different sentence."
+        : "Kept — you confirmed this is the sentence; it is included in your reading summary." });
+      if (target === "MISMATCH") {
+        kn.append(" ", el("button", { type: "button", class: "rerecord-btn", text: "Re-record",
+          onclick: () => window.__readerApi.rerecord(a, segId) }));
+      }
+      d.append(kn);
+    }
+    if (idn.needsDecision) {
+      const ask = el("div", { class: "target-ask", "data-target": target }, [el("p", { text: idn.message })]);
       ask.append(
         el("button", { type: "button", class: "keep-btn", text: "Keep this recording",
           onclick: () => {
@@ -379,8 +482,12 @@ if (typeof document !== "undefined") {
           onclick: () => window.__readerApi.rerecord(a, segId) }),
       );
       d.append(ask);
-      if (target === "MISMATCH" && a.user_disposition !== "kept") { d.append(footer); return; } // no feedback by default
+    } else if (target === "MATCH" && (idn.feedback === "withheld_boundary" || idn.feedback === "withheld_containment")) {
+      d.append(el("p", { class: "identity-note", "data-target": target, text: idn.message }));
     }
+    if (a.status && a.status.analysis_note) d.append(el("p", { class: "muted analysis-note", text: a.status.analysis_note }));
+    // a different sentence: never pronunciation feedback, kept or not (Keep preserves; it does not unlock)
+    if (idn.feedback === "hidden_identity") { d.append(footer); return; }
     const body = el("div", { class: "drawer-body" }, [el("p", { class: "muted", text: "Loading…" })]);
     d.append(body, footer);
     fillDrawer(S, body, a, job);
@@ -425,6 +532,7 @@ if (typeof document !== "undefined") {
       body.append(sec);
     }
 
+    body.append(fluencySection(S, a, job, view.fluency));
     body.append(boundarySection(S, job, otherBoundary(a, S.snap.jobs)));
 
     const cmpBox = el("div", { class: "compare" });
@@ -433,6 +541,68 @@ if (typeof document !== "undefined") {
     body.append(el("div", { class: "line" }, [btn, el("span", { class: "muted small",
       text: "Both models share one acoustic model; differences are shown, not resolved." })]), cmpBox);
     body.append(el("p", { class: "muted small", text: `Evidence: ${job.engine_id} · recording ${a.id.slice(0, 8)} · analysis ${job.id.slice(0, 8)}` }));
+  }
+
+  /** Details → Fluency (M8): the summary, things to notice with Listen, the rate; evidence on request. */
+  function fluencySection(S, a, job, fl) {
+    const el = domEl;
+    const items = fluencyItems(fl);
+    const sec = el("details", { class: "fluency", "data-state": fl ? fl.state : "none" },
+      [el("summary", { text: `Fluency (${items.notice.length})` })]);
+    if (!fl || fl.state !== "ok") {
+      sec.append(el("p", { class: "muted", text: (fl && fl.message) || "No fluency evidence for this recording." }));
+      return sec;
+    }
+    sec.append(el("p", { class: "fluency-summary", text: fl.summary.text }));
+    const listen = (o, label) => el("button", { type: "button", class: "listen-fluency", "data-id": o.id, text: label || "▶ Listen",
+      onclick: (ev) => playRef(S, refFor(a, job, o.playback.play_ms, "fluency:" + o.type), ev.target) });
+    const list = el("ul", { class: "fluency-list" });
+    for (const o of items.notice) {
+      list.append(el("li", { class: "fluency-item", "data-type": o.type }, [
+        el("span", { class: "fl-label", text: o.label }), " ",
+        el("span", { class: "fl-observed", text: fluencyItemText(o) }), " ",
+        listen(o), " ", el("span", { class: "muted small", text: STRENGTH_TEXT[o.strength] || "" })]));
+    }
+    if (items.notice.length) sec.append(list);
+    sec.append(el("p", { class: "fluency-rate", text: rateText(fl.metrics) }));
+    if (items.other.length) {
+      const other = el("details", { class: "fluency-other" }, [el("summary", { text: `Other timing (${items.other.length})` })]);
+      const ul = el("ul", { class: "fluency-list" });
+      for (const o of items.other) ul.append(el("li", { class: "fluency-item", "data-type": o.type }, [
+        el("span", { class: "fl-label", text: o.label }), " ", el("span", { class: "fl-observed", text: fluencyItemText(o) }), " ", listen(o)]));
+      other.append(ul);
+      sec.append(other);
+    }
+    for (const cs of fl.continued_speech || []) {
+      sec.append(el("p", { class: "muted small fluency-continued" }, [
+        `Continued speech after the sentence (not part of this analysis): ${(cs.duration_ms / 1000).toFixed(1)} s. `,
+        el("button", { type: "button", class: "listen-fluency-continued", text: "▶ Listen",
+          onclick: (ev) => playRef(S, refFor(a, job, cs.playback.play_ms, cs.kind), ev.target) })]));
+    }
+    const tech = el("details", { class: "fluency-evidence" }, [el("summary", { text: "Evidence" })]);
+    for (const o of fl.observations) {
+      const ul = el("ul", { class: "small" });
+      for (const e of o.evidence) ul.append(el("li", { text: e.detail }));
+      tech.append(el("p", { class: "small", text: `${o.label} · ${(o.start_ms / 1000).toFixed(2)}–${(o.end_ms / 1000).toFixed(2)} s · ${STRENGTH_TEXT[o.strength]} · ${o.engine}` }),
+        ul, el("p", { class: "small muted", text: o.interpretation }));
+    }
+    for (const c of fl.caveats || []) tech.append(el("p", { class: "small muted", text: c }));
+    sec.append(tech);
+    return sec;
+  }
+
+  /** The other listening model's fluency evidence, side by side; agreement is not independent confirmation. */
+  function renderFluencyComparison(box, cmp) {
+    const el = domEl;
+    const sec = el("div", { class: "fluency-compare" }, [el("h4", { text: "Fluency, by listening model" })]);
+    if (!cmp.rows.length) sec.append(el("p", { class: "muted small", text: "Neither model shows a fluency observation to compare." }));
+    for (const r of cmp.rows) {
+      const o = r.first || r.second;
+      sec.append(el("p", { class: "small", "data-agreement": r.agreement,
+        text: `${o.label} · ${fluencyItemText(o)} — ${cmp.agreement_text[r.agreement]}` }));
+    }
+    sec.append(el("p", { class: "muted small", text: cmp.shared_model_note }));
+    box.append(sec);
   }
 
   /** Details → Sentence boundary: what was analysed, Listen to each part, and the technical evidence. */
@@ -448,9 +618,7 @@ if (typeof document !== "undefined") {
       BOUNDARY_UNCERTAIN: "Where this sentence ends is uncertain. Only the part up to the boundary was analysed; the rest is kept with the recording.",
       NO_RELIABLE_BOUNDARY: "The end of the sentence could not be checked; the whole recording was analysed.",
     }[b.state];
-    sec.append(el("p", { text: b.feedback_withheld
-      ? "Where this sentence ends could not be established, and speech seems to continue after it. No pronunciation feedback is shown for this recording; the recording is kept."
-      : plain }));
+    sec.append(el("p", { class: "boundary-plain", "data-withheld": b.withheld_reason || "", text: boundaryPlainText(b, plain) }));
     const names = { target: "▶ Listen to the sentence", overflow: "▶ Listen to the continued speech", uncertain: "▶ Listen to the uncertain part" };
     const line = el("div", { class: "line" });
     for (const r of b.regions || []) {
@@ -469,6 +637,9 @@ if (typeof document !== "undefined") {
       ["Sounds decoded after it", ev.post_phones === undefined ? "—" : String(ev.post_phones)],
       ["Speech-like sound after it", ms(ev.speech_after_ms)],
       ["Gap before the continuation", ms(ev.gap_ms)],
+      ["How the end was found", BOUNDARY_CONFIDENCE_TEXT[b.boundary_confidence] || "—"],
+      ["Pronunciation evidence", b.analysis && b.analysis.cost_per_sound != null
+        ? `${b.analysis.state === "ok" ? "clear enough" : "uncertain"} (${b.analysis.cost_per_sound.toFixed(2)} differences per expected sound, ${b.analysis.engine})` : "—"],
     ];
     const tech = el("details", { class: "boundary-evidence" }, [el("summary", { text: "Evidence" })]);
     const dl = el("dl", { class: "small" });
@@ -501,9 +672,9 @@ if (typeof document !== "undefined") {
     if (last) {
       const job = primaryJob(last, snap.jobs);
       const idx = S.segments.findIndex((s) => s.id === last.segment_id) + 1;
-      const tc = job && job.target_confirmation ? job.target_confirmation.state : null;
-      const line = (tc === "MISMATCH" || tc === "AMBIGUOUS") && last.user_disposition !== "kept"
-        ? "may not match the sentence — open to keep or re-record" : feedbackLine(job && job.feedback);
+      const idn = identityOf(last, job);
+      const line = idn.needsDecision ? `${NOTE_IDENTITY[idn.identity]} — open to keep or re-record`
+        : feedbackLine(job && job.feedback);
       rail.append(domEl("button", { type: "button", class: "rail-line", text: `Sentence ${idx}: ${line}`,
         onclick: () => S.segEls[last.segment_id].scrollIntoView({ block: "center", behavior: "smooth" }) }));
     }
@@ -536,9 +707,14 @@ if (typeof document !== "undefined") {
     }
     if (sum.stale) box.append(el("p", { class: "notice", text: "You read more after this summary. Finish reading again to update it." }));
     const cov = sum.coverage;
-    box.append(el("p", { class: "lead", text: `${cov.included} of ${cov.sentences} sentences included · ${cov.consistent_with_expected} of ${cov.sounds} sounds consistent with the expected sound.` }));
+    const [readLine, feedbackLine2] = readingLines(cov);
+    box.append(el("p", { class: "lead", text: readLine + "." }));
+    box.append(el("p", { class: "summary-feedback", text: feedbackLine2 + "." }));
+    if (cov.sounds) {
+      box.append(el("p", { class: "muted small", text: `${cov.consistent_with_expected} of ${cov.sounds} sounds consistent with the expected sound.` }));
+    }
     if (cov.not_included.length) {
-      box.append(el("p", { class: "muted small", text: "Not included: " + cov.not_included.map((x) => `sentence ${x.sentence} (${x.reason})`).join(", ") }));
+      box.append(el("p", { class: "muted small", text: "Not in the feedback: " + cov.not_included.map((x) => `sentence ${x.sentence} (${x.reason})`).join(", ") }));
     }
     const byId = Object.fromEntries(sum.patterns.map((p) => [p.id, p]));
     for (const g of sum.groups) {
@@ -588,5 +764,6 @@ if (typeof document !== "undefined") {
   const baseUpdate = update;
   function updateAll(S, snap) { baseUpdate(S, snap); renderSummary(S, snap); }
 
-  window.ReaderFeedback = { update: updateAll, renderNote, annotate, toggle, renderDrawer, renderSummary, closeWord };
+  window.ReaderFeedback = { update: updateAll, renderNote, annotate, toggle, renderDrawer, renderSummary, closeWord,
+    renderFluencyComparison };
 }

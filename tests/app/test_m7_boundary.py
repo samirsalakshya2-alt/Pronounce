@@ -181,14 +181,28 @@ def test_whole_recording_alignment_stretching_into_the_continuation_is_not_trust
     assert b["evidence"]["engine_alignment_stretched"] and any("analysed again" in x for x in b["reasons"])
 
 
-def test_uncertain_final_word_partly_decoded():
+def test_partly_decoded_final_word_before_a_clear_pause_is_a_found_boundary():
+    # M7 boundary-confidence correction: the pause and the continued speech establish the end; the final
+    # word's missing sounds lie before the pause and are a pronunciation observation, not an unknown boundary
     d, end = H.sentence_decoded()
-    d = d[:-2]  # "change" only partly decoded ("tʃ eɪ"), then the reader goes on
+    d = d[:-2]  # "change" only partly decoded ("tʃ eɪ"), then a pause, then the reader goes on
     c = H.heard(H.CONTINUATION, d[-1][2] + 300)
     b = detect(d + c, [(300, d[-1][2]), (c[0][1], c[-1][2])], c[-1][2] + 300)
-    assert b["state"] == "BOUNDARY_UNCERTAIN"
-    assert [r["kind"] for r in b["regions"]] == ["target", "uncertain"]
-    assert any("only partly decoded" in r for r in b["reasons"])
+    assert b["state"] == "TARGET_PLUS_OVERFLOW" and b["boundary_confidence"] == "supported"
+    assert [r["kind"] for r in b["regions"]] == ["target", "overflow"]
+    assert any("pronunciation observation" in r for r in b["reasons"])
+    assert d[-1][2] <= b["cut_ms"] <= c[0][1]
+
+
+def test_without_a_pause_local_support_is_never_claimed():
+    d, end = H.sentence_decoded()
+    d = d[:-2]  # "change" only partly decoded, then the next sentence straight away: no pause marks the end
+    c = H.heard(H.CONTINUATION, d[-1][2] + 80)
+    b = detect(d + c, [(300, c[-1][2])], c[-1][2] + 300)
+    support = b["evidence"]["boundary_support"]
+    assert not support["supported"] and "no pause before the continued speech" in support["failed"]
+    assert b["boundary_confidence"] == "clear_recording" and not b["relied_on_local_support"]
+    assert any("approximate" in r for r in b["reasons"])
 
 
 def test_alignment_suspect_insertions_inside_the_final_word_make_it_uncertain():
@@ -551,3 +565,121 @@ def test_unclear_sentence_without_continuation_is_not_affected():
     d, end = H.sentence_decoded()
     b = detect(_garbled(d, every=1), [(300, end)], end + 600)
     assert b["state"] == "TARGET_ONLY"
+
+
+# ----------------------------------------------------------------------
+# Boundary confidence (local) vs analysis confidence (after isolation)
+# ----------------------------------------------------------------------
+
+LONG = [("the", "ð ə"), ("second", "s ɛ k ə n d"), ("mistake", "m ɪ s t eɪ k"), ("is", "ɪ z"),
+        ("believing", "b ɪ l iː v ɪ ŋ"), ("that", "ð æ t"), ("collaborating", "k ə l æ b ə ɹ eɪ t ɪ ŋ"),
+        ("is", "ɪ z"), ("an", "æ n"), ("act", "æ k t"), ("of", "ʌ v"), ("goodwill", "ɡ ʊ d w ɪ l")]
+
+
+def long_decoded():
+    d = H.heard(" ".join(p for _, p in LONG), 300)
+    return d, d[-1][2]
+
+
+def _garble_start(decoded, share=0.75):
+    """The first `share` of the sentence decoded as nothing like it (the whole recording decoded poorly)."""
+    k = int(len(decoded) * share)
+    return [("ʔ", a, b) for _, a, b in decoded[:k]] + decoded[k:]
+
+
+def poorly_decoded_with_pause(gap_ms=1000.0, last_sound=True, noisy=False, garble_end=False, pause_sound=False):
+    """A long sentence decoded poorly as a whole (its start garbled) but with a clear end, then a pause."""
+    d, end = long_decoded()
+    d = _garble_start(d)
+    if garble_end:
+        d = [("ʔ", a, b) for _, a, b in d]
+    if not last_sound:
+        d = d[:-1]                                   # the final /dʒ/ not decoded before the pause
+    last = d[-1][2]
+    c = H.heard(H.CONTINUATION, last + gap_ms)
+    speech = [(300, last), (c[0][1], c[-1][2])] + ([(last + 300, last + gap_ms - 300)] if pause_sound else [])
+    dur = c[-1][2] + 400
+    r = H.make(LONG, d + c, duration_ms=dur)
+    x = H.audio(dur, speech, noise_db=-24.0 if noisy else -65.0)
+    b = B.detect_boundary(r, x, SR)
+    assert B.validate_boundary(b) == []
+    return b, last, c[0][1]
+
+
+def test_poor_whole_decoding_with_a_clear_pause_is_a_supported_boundary():
+    b, last, first = poorly_decoded_with_pause()
+    assert b["evidence"]["alignment_cost_per_sound"] > B.MAX_DEFENSIBLE_COST   # the old rule would withhold
+    assert b["boundary_confidence"] == "supported" and b["relied_on_local_support"] and b["defensible"]
+    assert b["state"] == "TARGET_PLUS_OVERFLOW" and last <= b["cut_ms"] <= first
+    assert any("rests on the pause" in r for r in b["reasons"])
+
+
+def test_missing_final_sound_before_a_clear_pause_is_a_pronunciation_observation():
+    b, last, first = poorly_decoded_with_pause(last_sound=False)
+    assert b["evidence"]["final_word_decoded"] == "5/6" and not b["evidence"]["final_word_complete"]
+    assert b["state"] == "TARGET_PLUS_OVERFLOW" and b["boundary_confidence"] == "supported"
+    assert any("pronunciation observation, not an unknown boundary" in r for r in b["reasons"])
+
+
+@pytest.mark.parametrize("kw, failure", [
+    ({"noisy": True}, "speech level not measurable reliably"),            # heavy noise: no local support
+    ({"gap_ms": 150.0}, "no pause before the continued speech"),
+    ({"garble_end": True}, "the end of the sentence was decoded unclearly"),
+    ({"pause_sound": True}, "the pause is not silent"),
+])
+def test_without_local_evidence_the_whole_recording_rule_still_protects(kw, failure):
+    b, last, first = poorly_decoded_with_pause(**kw)
+    assert failure in b["evidence"]["boundary_support"]["failed"]
+    assert b["boundary_confidence"] == "insufficient" and not b["defensible"] and b["state"] == "BOUNDARY_UNCERTAIN"
+    assert any("no clear pause marks it" in r or "no clear pause marks the end" in r for r in b["reasons"])
+
+
+def test_support_is_revoked_when_the_cut_is_not_silent(monkeypatch):
+    monkeypatch.setattr(B, "_quietest_ms", lambda act, lo, hi: lo)  # force the cut to the edge of the pause
+    d, end = long_decoded()
+    d = _garble_start(d)
+    last = d[-1][2]
+    c = H.heard(H.CONTINUATION, last + 1000)
+    dur = c[-1][2] + 400
+    x = H.audio(dur, [(300, last + 100), (c[0][1], c[-1][2])])  # speech-like sound right where the cut is forced
+    b = B.detect_boundary(H.make(LONG, d + c, duration_ms=dur), x, SR)
+    assert "the cut does not fall on a silent frame" in b["evidence"]["boundary_support"]["failed"]
+    assert not b["defensible"] and b["state"] == "BOUNDARY_UNCERTAIN"
+
+
+def test_a_boundary_found_only_through_the_pause_is_reverted_when_the_cut_is_not_silent(monkeypatch):
+    # clearly decoded, final word partly decoded: only the pause made it a found boundary; without a silent cut
+    # the end is approximate again (still defensible: the recording itself was decoded clearly)
+    monkeypatch.setattr(B, "_quietest_ms", lambda act, lo, hi: lo)
+    d, end = H.sentence_decoded()
+    d = d[:-2]
+    c = H.heard(H.CONTINUATION, d[-1][2] + 600)
+    b = detect(d + c, [(300, d[-1][2] + 80), (c[0][1], c[-1][2])], c[-1][2] + 300)
+    assert "the cut does not fall on a silent frame" in b["evidence"]["boundary_support"]["failed"]
+    assert b["defensible"] and b["boundary_confidence"] == "clear_recording"
+    assert b["state"] == "BOUNDARY_UNCERTAIN" and [r["kind"] for r in b["regions"]] == ["target", "uncertain"]
+
+
+def test_clear_recordings_are_unchanged_by_the_correction():
+    d, speech, dur, end, first = with_continuation(600)
+    b = detect(d, speech, dur)
+    assert b["state"] == "TARGET_PLUS_OVERFLOW" and b["defensible"] and not b["relied_on_local_support"]
+    assert b["boundary_confidence"] in ("supported", "clear_recording")
+
+
+def test_analysis_confidence_is_measured_on_the_result_it_is_given():
+    d, end = long_decoded()
+    clear = B.analysis_confidence(H.make(LONG, d))
+    poor = B.analysis_confidence(H.make(LONG, _garble_start(d)))
+    assert clear["state"] == "ok" and clear["cost_per_sound"] == 0.0
+    assert poor["state"] == "low_confidence" and poor["cost_per_sound"] > B.MAX_DEFENSIBLE_COST
+    failed = H.make(LONG, d, status="failed")
+    assert B.analysis_confidence(failed)["state"] == "unavailable"
+
+
+def test_engine_disagreement_on_defensibility_is_visible():
+    a, _, _ = poorly_decoded_with_pause()
+    other = dict(a, defensible=False, boundary_confidence="insufficient")
+    cmp = B.compare_boundaries(a, other)
+    assert cmp["differs"] and cmp["defensible"] is False and cmp["boundary_confidence"] == "insufficient"
+    assert B.compare_boundaries(a, dict(a))["differs"] is False

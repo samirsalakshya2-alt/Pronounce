@@ -89,6 +89,24 @@ STRONG_CONTINUATION_PHONES = 8
 # into the sentence — so feedback is withheld instead. R01–R20 + continuations: <= 0.30; the M7
 # manual-test attempts (noisy room, cuts correct): 0.36–0.42; speech-dense noisy simulations: 0.59–0.91.
 MAX_DEFENSIBLE_COST = 0.5
+# Local boundary support (M7 boundary-confidence correction). The whole-recording decoding cost above
+# measures how well the *recording* was decoded, not whether the cut is right: a 44 s sentence read slowly
+# in a noisy room can average 0.55 while its end is perfectly clear. A boundary is locally supported when
+# the evidence *around the cut* establishes it — then it is isolated whatever the whole-recording cost:
+#   * the speech-level estimate is reliable (heavy noise fails this: the guard against wandering cuts);
+#   * decoded continuation and speech-like sound after the sentence (as for any overflow);
+#   * a real pause: >= SUPPORT_MIN_GAP_MS between the sentence's last decoded sound and the continuation,
+#     at least SUPPORT_SILENT_SHARE of it without speech-like sound, and the cut itself on a silent frame;
+#   * the end of the sentence decoded recognisably: its last SUPPORT_LOCAL_WORDS words at most
+#     SUPPORT_LOCAL_MAX_COST differences per expected sound; its final word reached (>= half its sounds);
+#   * no repeated final word, no extra sounds or pause inside the final word.
+# When it is supported, a final sound missing before the pause (a weakly released /d/) is a pronunciation
+# observation inside the sentence, not boundary uncertainty. When it is not, the whole-recording rule above
+# still decides (heavy-noise protection unchanged).
+SUPPORT_MIN_GAP_MS = PAUSE_MS
+SUPPORT_SILENT_SHARE = 0.8
+SUPPORT_LOCAL_WORDS = 3
+SUPPORT_LOCAL_MAX_COST = 0.5
 # Two engines' boundaries "differ" when their states differ or their cuts are this far apart.
 DISAGREE_CUT_MS = 200.0
 # The few decoded sounds after the cheapest end may themselves finish with the sentence's final word
@@ -105,6 +123,8 @@ THRESHOLDS = {
     "final_word_at_end_share": FINAL_WORD_AT_END_SHARE, "repeat_tail_max_extra": REPEAT_TAIL_MAX_EXTRA,
     "disagree_cut_ms": DISAGREE_CUT_MS, "min_activity_coverage": MIN_ACTIVITY_COVERAGE,
     "strong_continuation_phones": STRONG_CONTINUATION_PHONES, "max_defensible_cost": MAX_DEFENSIBLE_COST,
+    "support_min_gap_ms": SUPPORT_MIN_GAP_MS, "support_silent_share": SUPPORT_SILENT_SHARE,
+    "support_local_words": SUPPORT_LOCAL_WORDS, "support_local_max_cost": SUPPORT_LOCAL_MAX_COST,
     "activity": {"win_ms": ACTIVITY_WIN_MS, "hop_ms": ACTIVITY_HOP_MS, "margin_db": ACTIVITY_MARGIN_DB,
                  "min_dbfs": ACTIVITY_MIN_DBFS, "digital_silence_dbfs": DIGITAL_SILENCE_DBFS},
 }
@@ -243,6 +263,52 @@ def ends_with(tail: list[str], word: list[str]) -> bool:
     return matched >= FINAL_WORD_AT_END_SHARE * len(word)
 
 
+def local_support(act, reliable, post, t_end, speech_after, pairs, expected, heard, word_of, final_wi, final_share,
+                  last_wi, inside, split_by_pause, repeat_end) -> dict[str, Any]:
+    """Is the end of the sentence established by the evidence around it (not by the whole recording)?"""
+    failed: list[str] = []
+    gap = (post[0][0] - t_end) if post else None
+    silent_share = None
+    if gap is not None and gap > 0 and len(act["active"]):
+        hop = act["hop_ms"]
+        i0, i1 = int(math.ceil(t_end / hop)), int(post[0][0] / hop)
+        frames = act["active"][i0:i1]
+        silent_share = float(1.0 - frames.mean()) if len(frames) else None
+    local_words = set(range(max(0, final_wi - SUPPORT_LOCAL_WORDS + 1), final_wi + 1))
+    local = [(i, j) for i, j in pairs if i is not None and word_of[i] in local_words]
+    local_cost = (sum(1 for i, j in local if j is None or heard[j] != expected[i]) / len(local)) if local else None
+    if not reliable:
+        failed.append("speech level not measurable reliably")
+    if len(post) < MIN_OVERFLOW_PHONES or speech_after < MIN_OVERFLOW_SPEECH_MS:
+        failed.append("too little continued speech")
+    if gap is None or gap < SUPPORT_MIN_GAP_MS:
+        failed.append("no pause before the continued speech")
+    elif silent_share is None or silent_share < SUPPORT_SILENT_SHARE:
+        failed.append("the pause is not silent")
+    if local_cost is None or local_cost > SUPPORT_LOCAL_MAX_COST:
+        failed.append("the end of the sentence was decoded unclearly")
+    if last_wi != final_wi or final_share < MIN_FINAL_WORD_DECODED:
+        failed.append("the final word was not reached")
+    if inside or split_by_pause or repeat_end is not None:
+        failed.append("the final word is interrupted or repeated")
+    return {"supported": not failed, "failed": failed, "gap_ms": gap,
+            "silent_share": round(silent_share, 3) if silent_share is not None else None,
+            "local_cost": round(local_cost, 3) if local_cost is not None else None}
+
+
+def analysis_confidence(result: PronunciationResult) -> dict[str, Any]:
+    """Pronunciation-analysis confidence of the result actually shown (after isolation): how recognisably the
+    sentence was decoded. Separate from boundary confidence; it never moves or invalidates a boundary."""
+    expected = [p.expected.phoneme for w in result.words for p in w.phonemes]
+    heard = (result.engine_evidence.get("recognition") or {}).get("phones") or []
+    if result.status in ("failed", "blocked") or not expected:
+        return {"state": "unavailable", "cost_per_sound": None, "engine": result.engine.name}
+    end_free_alignment(expected, heard)
+    cost = end_free_alignment.last_cost / len(expected)
+    return {"state": "ok" if cost <= MAX_DEFENSIBLE_COST else "low_confidence", "cost_per_sound": round(cost, 4),
+            "engine": result.engine.name, "max_cost": MAX_DEFENSIBLE_COST}
+
+
 def _no_boundary(state: str, reasons: list[str], duration: float, engine: str | None, evidence=None) -> dict[str, Any]:
     return {"version": BOUNDARY_VERSION, "state": state, "engine": engine, "reasons": reasons,
             "duration_ms": duration, "cut_ms": duration, "evidence": evidence or {}, "thresholds": THRESHOLDS,
@@ -327,6 +393,12 @@ def detect_boundary(result: PronunciationResult, samples: np.ndarray, sample_rat
         "alignment_cost_per_sound": cost_per_sound,
     }
 
+    support = local_support(act, reliable, post, t_end, speech_after, pairs, expected, heard, word_of, final_wi,
+                            final_share, last_wi, inside, split_by_pause, repeat_end)
+    evidence["boundary_support"] = support
+    supported = support["supported"]
+    via_support = False
+
     # Decoded continuation is the primary evidence; speech energy may confirm it or rule out
     # decoder noise over silence, but only when the energy estimator is reliable in this recording.
     if len(post) < MIN_OVERFLOW_PHONES:
@@ -355,6 +427,13 @@ def detect_boundary(result: PronunciationResult, samples: np.ndarray, sample_rat
         state = "TARGET_PLUS_OVERFLOW"
         reasons = [f"the final word '{words[final_wi].word}' was decoded ({evidence['final_word_decoded']} sounds)",
                    f"{len(post)} further sounds were decoded after it, with {speech_after:.0f} ms of speech-like sound"]
+    elif supported:
+        # the pause and the continued speech establish the end; the missing final sound lies before the pause
+        state, via_support = "TARGET_PLUS_OVERFLOW", True
+        reasons = [f"a {support['gap_ms']:.0f} ms pause separates the sentence from {len(post)} further decoded sounds "
+                   f"({speech_after:.0f} ms of speech-like sound)",
+                   f"the final word '{words[final_wi].word}' was decoded {evidence['final_word_decoded']} before the pause: "
+                   "its missing sound is a pronunciation observation, not an unknown boundary"]
     else:
         state = "BOUNDARY_UNCERTAIN"
         reasons = [f"{len(post)} further sounds were decoded after the sentence"]
@@ -368,12 +447,17 @@ def detect_boundary(result: PronunciationResult, samples: np.ndarray, sample_rat
             reasons.append(f"{len(inside)} extra sounds were decoded inside the final word")
         if split_by_pause:
             reasons.append("the final word's decoded sounds are separated by a pause")
-    defensible = cost_per_sound is not None and cost_per_sound <= MAX_DEFENSIBLE_COST
+    # Boundary confidence: local evidence decides; the whole-recording cost only decides when it is absent.
+    clear_recording = cost_per_sound is not None and cost_per_sound <= MAX_DEFENSIBLE_COST
+    defensible = supported or clear_recording
     if not defensible:
         state = "BOUNDARY_UNCERTAIN"
         reasons.append(f"the sentence itself was decoded too unclearly to place its end ({cost_per_sound:.2f} "
-                       "differences per expected sound); no pronunciation feedback is shown")
-    elif stretched:
+                       "differences per expected sound) and no clear pause marks it; no pronunciation feedback is shown")
+    elif supported and not clear_recording:
+        reasons.append(f"the recording as a whole was decoded unclearly ({cost_per_sound:.2f} differences per expected "
+                       f"sound); the boundary rests on the pause around the cut, and the sentence is analysed on its own")
+    if defensible and stretched:
         reasons.append("analysed as one recording, the sentence's alignment extended into the continued speech; "
                        "the sentence is analysed again on its own")
 
@@ -386,6 +470,17 @@ def detect_boundary(result: PronunciationResult, samples: np.ndarray, sample_rat
     cut = float(min(max(cut, t_end), duration))
     if post and hi - t_end < CLEAN_GAP_MS:
         reasons.append(f"the gap before the continuation is short ({hi - t_end:.0f} ms); the boundary is approximate")
+    if supported and act["active"][min(len(act["active"]) - 1, int(cut / act["hop_ms"]))]:
+        # the quietest point is still speech-like: the pause does not mark the cut after all
+        supported = support["supported"] = False
+        support["failed"].append("the cut does not fall on a silent frame")
+        defensible = clear_recording
+        reasons.append("the quietest point before the continued speech is not silent; the boundary is approximate")
+        if not defensible or via_support:
+            state = "BOUNDARY_UNCERTAIN"
+        if not defensible:
+            reasons.append("no clear pause marks the end and the recording was decoded unclearly; "
+                           "no pronunciation feedback is shown")
     second = "overflow" if state == "TARGET_PLUS_OVERFLOW" else "uncertain"
     regions = [{"kind": "target", "start_ms": 0.0, "end_ms": cut}]
     if cut < duration:
@@ -393,7 +488,9 @@ def detect_boundary(result: PronunciationResult, samples: np.ndarray, sample_rat
     for r in regions:
         r["speech_ms"] = _active_ms(act, r["start_ms"], r["end_ms"])
     return {"version": BOUNDARY_VERSION, "state": state, "engine": engine, "reasons": reasons, "duration_ms": duration,
-            "cut_ms": cut, "evidence": evidence, "thresholds": THRESHOLDS, "regions": regions, "defensible": defensible}
+            "cut_ms": cut, "evidence": evidence, "thresholds": THRESHOLDS, "regions": regions, "defensible": defensible,
+            "boundary_confidence": ("supported" if supported else "clear_recording" if clear_recording else "insufficient"),
+            "relied_on_local_support": bool(supported and not clear_recording)}
 
 
 def map_to_capture(boundary: dict[str, Any], capture: dict[str, Any] | None) -> dict[str, Any]:
@@ -513,8 +610,11 @@ def check_target_analysis(boundary: dict[str, Any], target_result: Pronunciation
 
 def compare_boundaries(used: dict[str, Any], own: dict[str, Any]) -> dict[str, Any]:
     """Another engine's own boundary assessment of the same attempt, kept as evidence (never merged)."""
-    differs = used["state"] != own["state"] or abs(used["cut_ms"] - own["cut_ms"]) > DISAGREE_CUT_MS
+    # boundary_confidence "insufficient" is exactly "not defensible", so it covers defensibility too
+    differs = used["state"] != own["state"] or abs(used["cut_ms"] - own["cut_ms"]) > DISAGREE_CUT_MS \
+        or used.get("boundary_confidence") != own.get("boundary_confidence")
     return {"engine": own["engine"], "state": own["state"], "cut_ms": own["cut_ms"], "reasons": own["reasons"],
+            "defensible": own.get("defensible"), "boundary_confidence": own.get("boundary_confidence"),
             "differs": differs,
             "note": "Both local listening models share one acoustic model; agreement is not independent confirmation."}
 

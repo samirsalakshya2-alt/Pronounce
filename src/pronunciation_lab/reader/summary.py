@@ -4,7 +4,11 @@ Inputs — one attempt per sentence, the latest that is eligible:
 
 * analysed by the session's primary engine (primary job SUCCEEDED);
 * not discarded and not marked for re-recording;
-* target confirmed: MATCH, or AMBIGUOUS/MISMATCH explicitly kept by the user.
+* pronunciation feedback safe to show (not withheld by M7, not a different sentence);
+* identity MATCH or LIKELY_MATCH, or AMBIGUOUS explicitly kept by the user (reader/status.py).
+
+Reading coverage is reported separately from feedback: a sentence can be recorded and identified while its
+feedback is withheld (M7 boundary) or awaits the reader's decision (uncertain identity).
 
 Everything else is listed under "not included", with the reason. The M4
 pattern logic (`build_patterns`) is reused unchanged over the pooled M4
@@ -22,8 +26,9 @@ from typing import Any
 from pronunciation_lab.app.phoneme_patterns import build_patterns
 from pronunciation_lab.app.practice import GUIDANCE_NOTE, guidance
 from pronunciation_lab.reader import model as M
+from pronunciation_lab.reader.status import attempt_status
 
-SUMMARY_VERSION = "sum-1"
+SUMMARY_VERSION = "sum-2"
 MAX_EXAMPLES = 3
 SUMMARY_CAVEATS = [
     "This summarises one reading. It describes what the listening model heard, not a fixed trait.",
@@ -38,21 +43,8 @@ def _reading(text: str) -> str:
 
 
 def eligibility(attempt: dict[str, Any], primary: dict[str, Any] | None, engine: str) -> str | None:
-    """None if the attempt can be summarised, else the reason it is not."""
-    if attempt["user_disposition"] in ("discarded", "rerecord_requested"):
-        return "discarded" if attempt["user_disposition"] == "discarded" else "marked for re-recording"
-    if attempt["state"] != "ANALYZED" or primary is None or primary["state"] != "SUCCEEDED":
-        return "not analysed"
-    if primary["engine_id"] != engine:
-        return "analysed by another engine"
-    if (primary.get("boundary") or {}).get("feedback_withheld"):
-        return "sentence boundary uncertain"
-    target = (primary.get("target_confirmation") or {}).get("state")
-    if target == "MATCH":
-        return None
-    if target in ("AMBIGUOUS", "MISMATCH") and attempt["user_disposition"] == "kept":
-        return None
-    return "may not match the sentence"
+    """None if the attempt can be summarised, else the reason it is not (reader/status.py decision D)."""
+    return attempt_status(attempt, primary, engine)["summary"]
 
 
 def build_summary(store, session: dict[str, Any], article: dict[str, Any]) -> dict[str, Any]:
@@ -63,21 +55,36 @@ def build_summary(store, session: dict[str, Any], article: dict[str, Any]) -> di
     for a in attempts:
         by_segment.setdefault(a["segment_id"], []).append(a)
 
-    used, excluded = [], []
+    used, excluded, reading = [], [], {"recorded": 0, "identified": 0, "uncertain": 0, "different": 0, "unusable": 0,
+                                       "feedback_withheld": 0, "feedback_withheld_containment": 0,
+                                       "awaiting_decision": 0, "feedback_low_confidence": 0}
     for seg_id, atts in by_segment.items():
-        chosen, reasons = None, []
+        chosen, reasons, statuses = None, [], []
         for a in reversed(atts):
             jobs = [store.load_job(sid, a["id"], j) for j in a["job_ids"]]
             primary = next((j for j in reversed(jobs) if j["kind"] == "primary"), None)
-            reason = eligibility(a, primary, engine)
-            if reason is None:
+            st = attempt_status(a, primary, engine)
+            statuses.append((a, st))
+            if st["summary"] is None:
                 chosen = (a, primary)
                 break
-            reasons.append(reason)
+            reasons.append(st["summary"])
         if chosen:
             used.append(chosen)
         else:
             excluded.append({"segment_id": seg_id, "sentence": seg_index[seg_id] + 1, "reason": reasons[0]})
+        # the sentence's representative attempt: the one summarised, else the latest not set aside by the reader
+        current = [x for x in statuses if x[0]["user_disposition"] not in ("discarded", "rerecord_requested")]
+        rep_st = statuses[-1][1] if chosen else (current[0][1] if current else statuses[0][1])
+        reading["recorded"] += any(st["recorded"] for _, st in statuses)
+        reading[rep_st["identity_group"]] += 1
+        reading["feedback_withheld"] += (not chosen) and rep_st["feedback"] == "withheld_boundary"
+        reading["feedback_withheld_containment"] += (not chosen) and rep_st["feedback"] == "withheld_containment"
+        reading["feedback_low_confidence"] += bool(chosen) and rep_st["analysis"] == "low_confidence"
+        # feedback categories are exclusive: withheld feedback stays withheld even if the identity is decided
+        reading["awaiting_decision"] += (not chosen) and rep_st["feedback"] not in ("withheld_boundary",
+                                                                                "withheld_containment") \
+            and rep_st["needs_decision"]
 
     observations, candidates, refs = [], [], {}
     for a, job in used:
@@ -155,6 +162,8 @@ def build_summary(store, session: dict[str, Any], article: dict[str, Any]) -> di
             "sentences": len(readable),
             "read": len(by_segment),
             "included": len(used),
+            "feedback_included": len(used),
+            **reading,
             "not_included": sorted(excluded, key=lambda x: x["sentence"]),
             "sounds": sum(1 for o in observations if o["kind"] == "sound"),
             "consistent_with_expected": sum(1 for o in observations if o["kind"] == "sound" and o["type"] == "expected"),

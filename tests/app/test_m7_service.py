@@ -13,6 +13,7 @@ from readerhelpers import RUN, capture
 from pronunciation_lab.app.service import AnalysisService
 from pronunciation_lab.reader import boundary as B
 from pronunciation_lab.reader import model as M
+from pronunciation_lab.reader import service as reader_service
 from pronunciation_lab.reader.service import ReaderService
 from pronunciation_lab.reader.store import ReaderStore
 from pronunciation_lab.reader.summary import validate_summary
@@ -331,7 +332,8 @@ def test_containment_violation_withholds_feedback(m7reader, m7engines, monkeypat
     assert job["boundary"]["containment"]["ok"] is False
     view = detail["views"][job["id"]]
     assert view["state"] == "boundary_withheld" and not view["coach"]["observations"] and not view["words"]
-    assert job["feedback"]["message"] == B.WITHHELD_MESSAGE
+    assert job["feedback"]["message"].startswith("No pronunciation feedback: part of the analysis lay outside")
+    assert job["boundary"]["withheld_reason"] == "containment" and job["boundary"]["containment"]["checked"]
 
 
 def test_no_reliable_boundary_with_plausible_continuation_withholds_feedback(m7reader, m7engines, monkeypatch):
@@ -354,7 +356,7 @@ def test_no_reliable_boundary_with_plausible_continuation_withholds_feedback(m7r
     assert detail["views"][job["id"]]["state"] == "boundary_withheld"
     m7reader.session_action(sid, "finish")
     summary = m7reader.summary(sid)
-    assert summary["inputs"] == [] and summary["coverage"]["not_included"][0]["reason"] == "sentence boundary uncertain"
+    assert summary["inputs"] == [] and summary["coverage"]["not_included"][0]["reason"].startswith("sentence boundary uncertain")
 
 
 def test_no_reliable_boundary_without_continuation_keeps_the_pre_m7_fallback(m7reader, m7engines, monkeypatch):
@@ -395,3 +397,99 @@ def test_undefensible_boundary_withholds_feedback_without_a_second_inference(m7r
     # the continuation is still preserved and playable
     assert [r["kind"] for r in job["boundary"]["regions"]] == ["target", "uncertain"]
     assert job["boundary"]["regions"][1]["play"]["play_ms"][1] == pytest.approx(job["boundary"]["duration_ms"])
+
+
+# ----------------------------------------------------------------------
+# Boundary confidence vs analysis confidence in the reader
+# ----------------------------------------------------------------------
+
+def _relied(monkeypatch, recheck_issues=()):
+    """The boundary rests on local support alone (whole-recording cost above the limit)."""
+    real_detect, real_check = B.detect_boundary, B.check_target_analysis
+
+    def detect(result, samples, sr):
+        b = real_detect(result, samples, sr)
+        if b["state"] in B.NEEDS_TARGET_ANALYSIS:
+            b |= {"defensible": True, "boundary_confidence": "supported", "relied_on_local_support": True}
+        return b
+
+    def check(boundary, tres, samples, sr):
+        out = real_check(boundary, tres, samples, sr)
+        out["target_check"]["issues"] = list(recheck_issues)
+        return out
+
+    monkeypatch.setattr(B, "detect_boundary", detect)
+    monkeypatch.setattr(B, "check_target_analysis", check)
+
+
+def test_a_locally_supported_boundary_is_isolated_and_analysed_on_its_own(m7reader, monkeypatch):
+    _relied(monkeypatch)
+    seen, real_conf, real_pipeline = [], B.analysis_confidence, reader_service.analyze_pipeline
+
+    def tagged(*a, **kw):  # mark the sentence-only analysis (target.wav, recording id "...-t")
+        res, view = real_pipeline(*a, **kw)
+        res = res.model_copy(deep=True)  # the fake engine may hand out one shared result object
+        res.engine_evidence["sentence_only"] = kw["recording_id"].endswith("-t")
+        return res, view
+
+    monkeypatch.setattr(reader_service, "analyze_pipeline", tagged)
+    monkeypatch.setattr(B, "analysis_confidence", lambda r: seen.append(r.engine_evidence.get("sentence_only")) or real_conf(r))
+    sid, aid, _, detail, _ = read_attempt(m7reader)
+    job = primary(detail)
+    b = m7reader.store.load_boundary(job)
+    assert b["relied_on_local_support"] and b["target_analysed"] and not b["feedback_withheld"]
+    assert files(m7reader, job)["target.wav"].is_file() and b["containment"]["checked"] and b["containment"]["ok"]
+    from pronunciation_lab.benchmark.schema import PronunciationResult
+    tres = PronunciationResult.model_validate_json(files(m7reader, job)["target_result.json"].read_text())
+    assert seen and all(seen)                   # measured on the sentence-only result, not the full attempt
+    assert b["analysis"] == B.analysis_confidence(tres) | {"shown": True}
+    view = detail["views"][job["id"]]
+    assert view["analysis_confidence"] == b["analysis"] and view["state"] == "ok"
+
+
+def test_a_locally_supported_cut_that_the_sentence_alone_contradicts_is_withheld(m7reader, monkeypatch):
+    _relied(monkeypatch, recheck_issues=["the sentence on its own still shows sound after its end"])
+    sid, aid, _, detail, _ = read_attempt(m7reader)
+    job = primary(detail)
+    b = m7reader.store.load_boundary(job)
+    assert b["feedback_withheld"] and b["withheld_reason"] == "boundary" and b["state"] == "BOUNDARY_UNCERTAIN"
+    assert [r["kind"] for r in b["regions"]] == ["target", "uncertain"]
+    assert detail["views"][job["id"]]["state"] == "boundary_withheld"
+
+
+def test_containment_is_only_checked_on_an_analysis_that_is_shown(m7reader, monkeypatch):
+    real = B.detect_boundary
+    monkeypatch.setattr(B, "detect_boundary", lambda r, x, sr: real(r, x, sr) | {"defensible": False,
+                                                                                    "state": "BOUNDARY_UNCERTAIN"})
+    sid, aid, _, detail, _ = read_attempt(m7reader)
+    b = m7reader.store.load_boundary(primary(detail))
+    assert b["feedback_withheld"] and b["withheld_reason"] == "boundary"
+    assert b["containment"] == {"ok": None, "issues": [], "count": 0, "checked": False}
+    assert b["analysis"]["shown"] is False
+    st = next(a for a in m7reader.snapshot(sid)["attempts"] if a["id"] == aid)["status"]
+    assert st["analysis"] is None and st["analysis_note"] is None   # nothing shown, nothing to qualify
+    assert not any("lay outside" in r for r in b["reasons"])
+
+
+def test_status_and_summary_name_the_real_cause(m7reader, monkeypatch):
+    from pronunciation_lab.reader.status import CONTAINMENT_TEXT, LOW_CONFIDENCE_TEXT
+    real = B.evidence_outside_target
+    monkeypatch.setattr(B, "evidence_outside_target",
+                        lambda view, res, end, tolerance_ms=1.0: real(view, res, end - 400.0, tolerance_ms))
+    sid, aid, _, detail, _ = read_attempt(m7reader)
+    st = next(a for a in m7reader.snapshot(sid)["attempts"] if a["id"] == aid)["status"]
+    assert st["feedback"] == "withheld_containment" and st["withheld_reason"] == "containment"
+    m7reader.session_action(sid, "finish")
+    cov = m7reader.summary(sid)["coverage"]
+    assert cov["feedback_withheld_containment"] == 1 and cov["feedback_withheld"] == 0
+    assert cov["not_included"][0]["reason"] == "analysis not contained in the sentence — recording preserved, feedback withheld"
+    monkeypatch.undo()
+    monkeypatch.setattr(B, "analysis_confidence", lambda r: {"state": "low_confidence", "cost_per_sound": 0.62,
+                                                           "engine": r.engine.name, "max_cost": 0.5})
+    sid, aid, _, detail, _ = read_attempt(m7reader)
+    st = next(a for a in m7reader.snapshot(sid)["attempts"] if a["id"] == aid)["status"]
+    assert st["feedback"] == "shown" and st["analysis"] == "low_confidence" and st["analysis_note"] == LOW_CONFIDENCE_TEXT
+    m7reader.session_action(sid, "finish")
+    cov = m7reader.summary(sid)["coverage"]
+    assert cov["feedback_included"] == 1 and cov["feedback_low_confidence"] == 1
+    assert CONTAINMENT_TEXT.startswith("The sentence was separated")

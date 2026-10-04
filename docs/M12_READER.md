@@ -119,23 +119,122 @@ Browser /read                                        Python app process
 | Keyboard | Space, J/↓, K/↑, Esc | |
 | Fonts | system serif stack (Iowan Old Style, Palatino, Georgia) | local assets only |
 
-## Target confirmation (`reader/target.py`)
+## Target confirmation (`reader/target.py`) — tc-2
 
-Separate from pronunciation feedback; never free speech recognition. From the
-attempt's own alignment evidence:
-`support = (expected sounds decoded as expected + substitutions whose expected
-sound stays plausible, P ≥ 0.05) / expected sounds`.
+Target confirmation answers *"did the reader probably read this sentence?"* It is separate from:
 
-| | support | both engines, benchmark |
+* pronunciation feedback (M4/M5);
+* the sentence boundary (M7);
+* summary eligibility.
+
+It never uses free speech recognition: only the analysis's own decoded speech sounds and eSpeak's
+pronunciation of the article's known sentences.
+
+### Why tc-1 was replaced
+
+tc-1 measured phone accuracy:
+
+`support = (expected sounds decoded as expected + plausible substitutions) / expected sounds`, MATCH ≥ 0.76.
+
+That conflated identity with pronunciation. In a manual test, three sentences were read slowly in a noisy
+room. Every word was found in order across each recording, yet most sounds were decoded as other sounds
+(support 0.19–0.33, with non-English tokens from the multilingual model). They were called MISMATCH or
+AMBIGUOUS ("may not match"), and the summary included 0 of 3. In an earlier session, two clearly correct
+readings (support 0.73 and 0.68) were AMBIGUOUS for the same reason.
+
+### How tc-2 works
+
+tc-2 is contrastive. Each candidate sentence's expected sounds are aligned to the decoded sounds, folded
+into a coarse shared phone space (no length, stress, tone digits or diphthong/rhotic detail), with
+pronunciation-tolerant costs:
+
+* same-class substitution 0.6, cross-class 1.0;
+* missing sound 1.0, extra sound 0.4;
+* lead-in and trailing speech are free.
+
+Three measures come out of it:
+
+* **Order evidence** (`order_margin`): the target's fit minus its fit with the same words shuffled. Is this
+  sentence there, in this order? Pronunciation errors lower both fits alike.
+* **Contrast** (`contrast_margin`): the target's fit minus the best fit among the article's sentences up to
+  three before and after (the realistic confusions while reading).
+* **Coverage:** the share of substantial words (≥ 3 expected sounds) with an aligned same-class sound.
+  Dropped weak forms such as "the" or "to" don't count against it.
+
+| State | Rule | Meaning |
 |---|---|---|
-| true pairs (R01–R20 with their own text) | 0.82–0.98 | 40 / 40 MATCH |
-| partial reads (first half of the audio; an extra unread sentence) | 0.25–0.70 | 80 / 80 AMBIGUOUS |
-| another sentence's text | 0.03–0.34 | 34 MISMATCH, 6 AMBIGUOUS, 0 MATCH |
+| MATCH | order ≥ 0.18 and coverage ≥ 0.8 | "Recording appears to match this sentence." |
+| LIKELY_MATCH | this sentence fits best (contrast ≥ 0.08), coverage ≥ 0.9, weak order evidence | "probably this sentence, but the evidence is weak" |
+| MISMATCH | order ≤ 0.10 **and** another sentence of the article fits clearly better (contrast ≤ −0.25) | "appears to contain a different sentence" |
+| AMBIGUOUS | anything else (partial read, too little evidence, no known alternative) | "I couldn't confidently tell whether this recording is this sentence." |
+| NOT_APPLICABLE | the analysis produced no evidence | |
 
-MATCH ≥ 0.76 (midpoint of the gap between the lowest true pair and the highest
-partial read); MISMATCH < 0.25 (below the lowest partial read, so a partly read
-sentence is never hidden); no decoded speech → AMBIGUOUS; no evidence →
-NOT_APPLICABLE. Calibrated in-sample on one speaker's 20 recordings.
+* **MISMATCH needs a better-fitting sentence.** Without one, an unknown or unrelated recording is AMBIGUOUS.
+  Reading ahead into the next sentence is not a mismatch: the target's order evidence is still there.
+* **Very short sentences** (fewer than 3 words or 8 expected sounds) keep tc-1's phone support.
+* **Two engines.** When the other local engine is compared, its identity is stored beside the primary's. A
+  primary MISMATCH that the other engine does not share becomes AMBIGUOUS. Agreement is never independent
+  confirmation, because the engines share an acoustic model.
+* **Cost:** about 15 ms per attempt (alignment plus cached eSpeak G2P), and no inference.
+
+### Calibration (both engines, identical outcomes)
+
+| Set | wav2vec2_raw | openpronounce |
+|---|---|---|
+| R01–R20 with their own text | 20 MATCH | 20 MATCH |
+| …followed by another sentence (immediate, quiet, repeated or half-said final word) | 80/80 MATCH | 79 MATCH, 1 AMBIGUOUS |
+| another sentence's text (±3 neighbours as alternatives) | 31 MISMATCH, 9 AMBIGUOUS, **0 MATCH/LIKELY** | 31 MISMATCH, 9 AMBIGUOUS, **0 MATCH/LIKELY** |
+| first half of the recording | 20 AMBIGUOUS | 20 AMBIGUOUS |
+| true sentence in heavy noise (M7 speech-dense set) | 19 AMBIGUOUS, 1 LIKELY, **0 MISMATCH** | 20 AMBIGUOUS |
+| true sentence, noisy, nothing after | 4 MATCH, 7 LIKELY, 9 AMBIGUOUS, 0 MISMATCH | 4 MATCH, 6 LIKELY, 10 AMBIGUOUS, 0 MISMATCH |
+| real manual readings (7, two sessions, evaluated locally only) | 3 MATCH, 2 LIKELY, 2 AMBIGUOUS | same |
+| …the same recordings scored against the article's other sentences (14) | 6 MISMATCH, 8 AMBIGUOUS, **0 MATCH/LIKELY** | 5 MISMATCH, 9 AMBIGUOUS, 0 MATCH/LIKELY |
+
+## Four separate decisions (`reader/status.py`)
+
+Each attempt's `status` is derived, never stored, and appears in the snapshot. The reader's wording and the
+summary both use it, so they cannot disagree.
+
+| Decision | Values |
+|---|---|
+| A. identity | MATCH · LIKELY_MATCH · AMBIGUOUS · MISMATCH · TOO_SHORT · FAILED |
+| B. boundary | M7's state (authoritative) |
+| C. feedback | `shown` (with a caution note when the sentence-only analysis has low confidence) · `withheld_boundary` (M7: the sentence's end could not be established) · `withheld_containment` (the separated sentence's analysis did not stay inside it) · `hidden_identity` (a different sentence) · `none` |
+| D. summary | included, or a distinct reason |
+
+The summary reasons are:
+
+* marked for re-recording;
+* discarded;
+* not analysed;
+* appears to contain a different sentence;
+* sentence boundary uncertain — recording preserved, feedback withheld;
+* analysis not contained in the sentence — recording preserved, feedback withheld;
+* could not confirm it is this sentence — keep it to include it.
+
+**Normal and probable readings need no action.** MATCH and LIKELY_MATCH are included in the feedback
+summary automatically when their feedback is safe. When M7 withheld it, they still count as recorded and
+identified. **Keep** is the override for an uncertain identity (AMBIGUOUS). It means *"I confirm it is this
+sentence"* and includes the attempt if its feedback is otherwise safe. **It never unlocks unsafe feedback.** A recording that
+appears to contain a different sentence, or whose end M7 could not place, stays without feedback when kept.
+The reader then says so and offers Re-record.
+
+**Reading summary — recorded vs feedback (sum-2).** The summary never says "0 of N included" for a session
+that was read. It reports two lines; the feedback categories are exclusive and add up to the recorded
+sentences:
+
+* *5 of 5 sentences recorded · 3 identified · 2 uncertain* — what was read. "Recorded" means MATCH,
+  LIKELY_MATCH or AMBIGUOUS, not discarded; a different sentence is listed as "seems to be a different
+  sentence", not as recorded.
+* *1 sentence in the feedback below · 2 withheld because the sentence boundary was uncertain · 2 waiting for
+  you to keep or re-record* — what the pronunciation, connected-speech and fluency feedback covers.
+
+**MATCH + BOUNDARY_UNCERTAIN** is a valid state: "Your reading appears to match this sentence, but I couldn't
+safely determine where it ended."
+
+**Nothing is ever deleted.** Re-record marks the old attempt (`rerecord_requested`) and keeps its audio,
+analysis and history. The summary uses each sentence's latest eligible attempt, which may be an older kept
+attempt if the retake is not eligible.
 
 ## Validation
 
@@ -164,9 +263,10 @@ fake microphone → AudioWorklet → 48 kHz WAV → `prepare_audio` gives the sa
 
 * AudioWorklet capture was verified in Chrome 154 (automated); Safari 27 has
   AudioWorklet but was not tested here — check it manually.
-* Target confirmation thresholds come from one speaker; another voice or a
-  noisy room may need recalibration. A sentence read with a long pause inside
-  may be AMBIGUOUS.
+* Target confirmation (tc-2) is calibrated on one speaker's benchmark plus two
+  real manual sessions. A recording whose decoded sounds are close to noise is
+  AMBIGUOUS, even when it is the sentence; Keep includes it. MISMATCH needs
+  another sentence of the article (±3) that fits clearly better.
 * The summary aggregates one session; patterns across sessions are not
   computed.
 * An attempt's audio is uploaded when the sentence ends; a browser crash in the

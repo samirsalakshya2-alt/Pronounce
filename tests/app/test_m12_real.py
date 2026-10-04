@@ -12,6 +12,7 @@ from apphelpers import DATA_DIR, Client
 
 from pronunciation_lab.app.server import start_in_thread
 from pronunciation_lab.app.service import AnalysisService
+from pronunciation_lab.reader import boundary as B
 from pronunciation_lab.reader.service import ReaderService
 from pronunciation_lab.reader.store import ReaderStore
 
@@ -94,7 +95,8 @@ def test_reader_in_a_real_browser(reader_real, tmp_path):
     fb = r["feedback"]
     first = att[0]
     assert fb["drawerIds"]["attempt"] == first["id"] and fb["drawerIds"]["job"] and fb["drawerIds"]["timeline"] == "analysis_wav"
-    assert fb["compact"] and re.fullmatch(r"(\d+ things? to notice)?( · )?(\d+ to compare)?|Nothing stood out",
+    assert fb["compact"] and re.fullmatch(r"((\d+ things? to notice)?( · )?(\d+ to compare)?|Nothing stood out)"
+                                                      r"( · pronunciation evidence uncertain)?",
                                                       fb["compact"]), fb["compact"]
     ref = fb["listenRef"]
     assert (ref["session_id"], ref["attempt_id"], ref["job_id"], ref["timeline"], ref["kind"]) == \
@@ -112,7 +114,7 @@ def test_reader_in_a_real_browser(reader_real, tmp_path):
     assert r["keyboard"]["runs"] == 2 and r["keyboard"]["state"] == "RELEASED"  # resume re-acquired the microphone
     assert r["finish"]["session"] == "SUMMARIZED" and r["finish"]["finishDisabled"]
     sm = r["finish"]["summary"]
-    assert sm["heading"] == "Your reading" and re.match(r"\d+ of 4 sentences included", sm["lead"])
+    assert sm["heading"] == "Your reading" and re.match(r"\d+ of 4 sentences recorded", sm["lead"])
     for banned in ("score", "wrong", "incorrect", "worst", "rank"):
         assert banned not in sm["text"].lower()
     assert r["reload"]["attempts"] == 6 and r["reload"]["visibleMarks"] == 4  # nothing lost across a reload
@@ -124,7 +126,7 @@ def test_reader_in_a_real_browser(reader_real, tmp_path):
 
 from pronunciation_lab.app.ground_truth import GROUND_TRUTH_IDS, load_frozen, manifest  # noqa: E402
 from pronunciation_lab.benchmark.base import safe_analyze  # noqa: E402
-from pronunciation_lab.reader.target import confirm_target  # noqa: E402
+from pronunciation_lab.reader.target import confirm_target, neighbours  # noqa: E402
 
 ENGINES = ("wav2vec2_raw", "openpronounce")
 
@@ -137,9 +139,11 @@ def _texts():
 
 @pytest.mark.parametrize("engine", ENGINES)
 def test_true_pairs_are_confirmed(engine):
+    man, texts = _texts()
     for rid in GROUND_TRUTH_IDS:
-        tc = confirm_target(load_frozen(rid, engine, DATA_DIR))
-        assert tc["state"] == "MATCH", (rid, tc["evidence"]["support"])
+        text = man[rid]["target_text"]
+        tc = confirm_target(load_frozen(rid, engine, DATA_DIR), neighbours(texts, texts.index(text)))
+        assert tc["state"] == "MATCH", (rid, tc["identity"])
 
 
 @pytest.mark.parametrize("engine", ENGINES)
@@ -151,9 +155,9 @@ def test_mismatched_pairs_are_never_confirmed(reader_real, engine):
         other = texts[(texts.index(man[rid]["target_text"]) + 1) % len(texts)]
         with svc._lock:
             res = safe_analyze(svc._instances[engine], DATA_DIR / "benchmark_wav" / f"{rid}.wav", other, recording_id="tc")
-        states.append(confirm_target(res)["state"])
-    assert "MATCH" not in states
-    assert states.count("MISMATCH") >= 15, states  # calibration: 17/20; the rest AMBIGUOUS (re-record offered)
+        states.append(confirm_target(res, neighbours(texts, texts.index(other)))["state"])
+    assert "MATCH" not in states and "LIKELY_MATCH" not in states
+    assert states.count("MISMATCH") >= 15, states  # tc-2: the sentence read is a neighbour, so it fits better
 
 
 @pytest.mark.parametrize("engine", ENGINES)
@@ -172,8 +176,9 @@ def test_partial_reads_are_ambiguous_never_hidden(reader_real, engine, tmp_path)
             a = safe_analyze(svc._instances[engine], half, text, recording_id="tc")
             b = safe_analyze(svc._instances[engine], DATA_DIR / "benchmark_wav" / f"{rid}.wav", text + " " + extra,
                              recording_id="tc")
-        assert confirm_target(a)["state"] == "AMBIGUOUS", (rid, "half audio")
-        assert confirm_target(b)["state"] == "AMBIGUOUS", (rid, "unread sentence")
+        alts = neighbours(texts, texts.index(text))
+        assert confirm_target(a, alts)["state"] == "AMBIGUOUS", (rid, "half audio")
+        assert confirm_target(b, alts)["state"] == "AMBIGUOUS", (rid, "unread sentence")  # never MATCH, never hidden
 
 
 # ----------------------------------------------------------------------
@@ -235,7 +240,11 @@ def test_reader_on_the_benchmark_matches_the_lab(reader_real, engine):
         view = detail["views"][job["id"]]
         # M7: a benchmark recording is the sentence only — one inference, the whole attempt analysed
         assert view.pop("boundary")["state"] == "TARGET_ONLY" == job["boundary"]["state"], rid
+        # M8: the reader adds M7 context to the fluency layer; the layer itself is the lab's
+        assert view["fluency"].pop("m7")["state"] == "TARGET_ONLY" and view["fluency"].pop("continued_speech") == []
         assert not reader.store.job_file(job, "target.wav").exists()
+        # boundary-confidence correction: analysis confidence of the shown analysis (the reader's addition)
+        assert view.pop("analysis_confidence") == B.analysis_confidence(stored) | {"shown": True}, rid
         assert _stable(view) == _stable(build_analysis_view(stored, reader.store.audio_path(sid, aid))), rid
         assert view["coach"]["integrity"]["ok"] and view["reduction"]["integrity"]["ok"]
     jw = reader.attempt_detail(sid, wrong)["jobs"][0]
@@ -297,9 +306,8 @@ def test_mismatch_hides_feedback_until_kept_in_the_browser(reader_real):
 
     _, reader, _, server = reader_real
     man = manifest(DATA_DIR)
-    # M7: the wrong sentence is R19's — its end is still defensible (TARGET_ONLY), so keeping the recording
-    # reveals the evidence. (Against R05's text the sentence cannot be located at all and M7 withholds
-    # feedback even after Keep: test_m7_real.py::test_kept_wrong_sentence_without_a_defensible_boundary.)
+    # R01 read against R19's sentence: target confirmation (tc-2) finds the article's other sentence fits
+    # clearly better — MISMATCH. Keep preserves it but never shows pronunciation feedback for it.
     article = reader.create_article(man["R01"]["target_text"] + " " + man["R19"]["target_text"], "Target check")
     sid = M.new_id()
     reader.create_session(sid, article["id"])
@@ -314,14 +322,17 @@ def test_mismatch_hides_feedback_until_kept_in_the_browser(reader_real):
             for a in reader.snapshot(sid)["session"]["attempt_ids"]] == ["TARGET_ONLY", "TARGET_ONLY"]
     r = run_driver("browser_target.mjs", server, str(DATA_DIR / "benchmark_wav" / "R01.wav"), sid, s1["id"], s2["id"])
     assert r["match"] == {"ask": False, "details": True, "compact": r["match"]["compact"]} and r["match"]["compact"]
-    assert "may not be this sentence" in r["mismatchMark"]["title"] and "to notice" not in r["mismatchMark"]["text"]
+    assert "appears to be a different sentence" in r["mismatchMark"]["title"] and "to notice" not in r["mismatchMark"]["text"]
     mm = r["mismatch"]
     assert mm["ask"] == "MISMATCH" and mm["keep"] and mm["rerecord"]
     assert not mm["details"] and not mm["compact"]            # no pronunciation feedback by default
     assert "to notice" not in mm["text"]
-    assert "may not match" in r["rail"]
+    assert "appears to be a different sentence — open to keep or re-record" in r["rail"]
     assert r["mismatchAnnotated"] == {"annotated": False, "words": 0, "matchAnnotated": True}  # plain article text
-    assert r["afterKeep"]["details"] and r["afterKeep"]["annotated"]   # the user's choice reveals the evidence
+    # Keep preserves the recording; it never unlocks feedback for what appears to be a different sentence
+    ak = r["afterKeep"]
+    assert not ak["details"] and not ak["annotated"] and not ak["stillAsks"]
+    assert ak["keptNote"].startswith("Kept — the recording is preserved")
     assert r["rerecord"]["recording"] == s2["id"] and r["rerecord"]["drawerHidden"]
     disp = r["dispositions"]
     assert disp[1] == [s2["id"], "rerecord_requested"] and disp[-1][0] == s2["id"]  # old attempt kept in history

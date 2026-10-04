@@ -247,6 +247,76 @@ committed), both engines:
 * **Sentence 1:** unchanged (cut 10.12 s).
 * **Sentence 3:** `TARGET_ONLY` (it had no continuation).
 
+## Boundary-confidence correction (boundary vs analysis confidence)
+
+A real attempt (44.9 s, sentence ending at about 41.3 s, followed by a 1 s
+silent pause and continued reading) was withheld because the *whole
+recording* was decoded at 0.548 differences per expected sound (raw
+Wav2Vec2). That is just above the 0.5 defensibility limit, although its end
+was clearly marked. The whole-recording cost measures decoding quality, not
+where the sentence ends. Two separate decisions now apply:
+
+* **Boundary confidence** (`boundary_confidence`) uses local temporal
+  evidence:
+  * `supported`: the pause and continued speech around the cut establish
+    the end;
+  * `clear_recording`: no such local evidence, but the recording was decoded
+    clearly enough (≤ 0.5);
+  * `insufficient`: neither. **Only this** withholds feedback as "could not
+    be separated".
+* **Analysis confidence** (`analysis`: `ok` / `low_confidence` /
+  `unavailable`) is measured on the result actually shown, i.e. the
+  sentence-only analysis after isolation. It never moves or invalidates a
+  boundary. When it is low, the shown feedback carries a caution note.
+
+**Local support** requires all of the following (failures are listed in
+`evidence.boundary_support.failed`):
+
+* a reliable speech-level estimate;
+* enough continued speech;
+* a pause of at least 250 ms before it, at least 80 % silent;
+* the last 3 words decoded at ≤ 0.5 differences per sound;
+* the final word reached, and not interrupted or repeated;
+* the chosen cut falls on a silent frame. If it does not, support is
+  revoked, and a boundary that existed only because of the support reverts
+  to `BOUNDARY_UNCERTAIN`.
+
+A final sound missing before such a pause (a weakly released /d/) is a
+pronunciation observation, not an unknown boundary.
+
+The heavy-noise protection is kept. Speech-dense noisy recordings
+(calibration E) fail local support (unreliable level estimate, garbled end,
+no silent pause), so they stay withheld at 20/20 on both engines, with
+identical cuts.
+
+**Safety around a boundary that rests on local support alone**
+(`relied_on_local_support`):
+
+* the sentence is always isolated (`target.wav`, `target_result.json`),
+  never analysed as the full attempt;
+* if the sentence-only re-check reports issues, feedback is withheld
+  (`withheld_reason: "boundary"`);
+* containment (M4, M5, M8 and words inside the cut) is checked on the
+  analysis actually shown. If anything lies outside, everything is withheld
+  (`withheld_reason: "containment"`) rather than trimmed, with its own
+  wording.
+
+A withheld analysis is not checked (`containment.checked: false`) and its
+analysis confidence is not reported (`analysis.shown: false`).
+
+**Results:**
+
+* **The real attempt:**
+  * `TARGET_PLUS_OVERFLOW`, cut 41.33 s, supported (1060 ms pause, 93 %
+    silent, local cost 0.33);
+  * sentence-only analysis at 0.49 (raw Wav2Vec2) and 0.46
+    (OpenPronounce), with no evidence outside the sentence;
+  * the final /d/ is reported as an omission.
+* **Calibration:** 9 cases per engine moved from `BOUNDARY_UNCERTAIN` to
+  `TARGET_PLUS_OVERFLOW` (weak final consonants before clear pauses). No
+  withholding decision changed, and the reference snapshots of M4, M5 and
+  the annotated words are unchanged.
+
 ## Validation (summary — see the M7 report for counts)
 
 **Calibration set** (`scratchpad`, not committed): R01–R20 per engine, 13
@@ -335,9 +405,10 @@ passes, both through the service and in a real browser.
   made by joining two of them, and on one real manual test.
   * Thresholds: level-estimate coverage 0.6, defensibility 0.5,
     strong continuation 8 sounds.
-  * The real attempts sit at 0.36–0.42 on the defensibility scale, below
-    the 0.5 limit, but not by much. A noisier room may get "withheld"
-    rather than feedback.
+  * The real attempts sit at 0.36–0.55 on the defensibility scale. Above
+    0.5, feedback depends on a clear local pause (boundary-confidence
+    correction). A noisier room with no pause between sentences may still
+    get "withheld" rather than feedback.
 * Noise without continuation is not M7's concern. A noisy sentence with
   nothing after it stays `TARGET_ONLY`, as before M7. But in very noisy
   recordings the decoder can produce sounds that look like continuation:
