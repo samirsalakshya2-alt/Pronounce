@@ -67,6 +67,13 @@ button.stop { color: var(--rec); border-color: color-mix(in srgb, var(--rec) 40%
 .note .details-toggle, .note .phrase { white-space: nowrap; }
 .note.processing { color: var(--faint); font-style: italic; }
 .note.attention .compact { color: var(--attention); }
+/* M7: continued speech after the sentence — quiet, never a warning */
+.note .boundary-note { color: var(--muted); font-style: italic; }
+.note .boundary-sub { color: var(--faint); }
+.note .listen-overflow { font: inherit; font-style: normal; color: var(--accent); background: none; border: 0; padding: 0 2px; cursor: pointer; }
+.drawer .boundary dl { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin: 6px 0; }
+.drawer .boundary dt { color: var(--muted); }
+.drawer .boundary dd { margin: 0; overflow-wrap: anywhere; }
 .details-toggle { font: inherit; color: var(--accent); background: none; border: 0; padding: 0 2px; cursor: pointer; }
 .details-toggle:hover { text-decoration: underline; }
 

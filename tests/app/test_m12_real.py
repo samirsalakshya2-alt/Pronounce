@@ -233,6 +233,9 @@ def test_reader_on_the_benchmark_matches_the_lab(reader_real, engine):
                [(p.expected.phoneme, p.observed.top, p.engine_evidence.get("operation"), p.timing.start_ms)
                 for w in frozen.words for p in w.phonemes], rid
         view = detail["views"][job["id"]]
+        # M7: a benchmark recording is the sentence only — one inference, the whole attempt analysed
+        assert view.pop("boundary")["state"] == "TARGET_ONLY" == job["boundary"]["state"], rid
+        assert not reader.store.job_file(job, "target.wav").exists()
         assert _stable(view) == _stable(build_analysis_view(stored, reader.store.audio_path(sid, aid))), rid
         assert view["coach"]["integrity"]["ok"] and view["reduction"]["integrity"]["ok"]
     jw = reader.attempt_detail(sid, wrong)["jobs"][0]
@@ -294,7 +297,10 @@ def test_mismatch_hides_feedback_until_kept_in_the_browser(reader_real):
 
     _, reader, _, server = reader_real
     man = manifest(DATA_DIR)
-    article = reader.create_article(man["R01"]["target_text"] + " " + man["R05"]["target_text"], "Target check")
+    # M7: the wrong sentence is R19's — its end is still defensible (TARGET_ONLY), so keeping the recording
+    # reveals the evidence. (Against R05's text the sentence cannot be located at all and M7 withholds
+    # feedback even after Keep: test_m7_real.py::test_kept_wrong_sentence_without_a_defensible_boundary.)
+    article = reader.create_article(man["R01"]["target_text"] + " " + man["R19"]["target_text"], "Target check")
     sid = M.new_id()
     reader.create_session(sid, article["id"])
     s1, s2 = article["segments"]
@@ -304,6 +310,8 @@ def test_mismatch_hides_feedback_until_kept_in_the_browser(reader_real):
     states = [reader.attempt_detail(sid, a)["jobs"][0]["target_confirmation"]["state"]
               for a in reader.snapshot(sid)["session"]["attempt_ids"]]
     assert states == ["MATCH", "MISMATCH"]
+    assert [reader.attempt_detail(sid, a)["jobs"][0]["boundary"]["state"]
+            for a in reader.snapshot(sid)["session"]["attempt_ids"]] == ["TARGET_ONLY", "TARGET_ONLY"]
     r = run_driver("browser_target.mjs", server, str(DATA_DIR / "benchmark_wav" / "R01.wav"), sid, s1["id"], s2["id"])
     assert r["match"] == {"ask": False, "details": True, "compact": r["match"]["compact"]} and r["match"]["compact"]
     assert "may not be this sentence" in r["mismatchMark"]["title"] and "to notice" not in r["mismatchMark"]["text"]

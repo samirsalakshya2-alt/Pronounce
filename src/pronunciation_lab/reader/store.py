@@ -200,6 +200,25 @@ class ReaderStore:
     def result_path(self, job: dict[str, Any]) -> Path:
         return self.job_dir(job["session_id"], job["attempt_id"], job["id"]) / "result.json"
 
+    # M7: the sentence's region of the attempt and its own analysis, written once per job
+    JOB_FILES = ("boundary.json", "target.wav", "target_result.json")
+
+    def write_job_file(self, job: dict[str, Any], name: str, data: bytes) -> Path:
+        if name not in self.JOB_FILES:
+            raise ValueError(name)
+        path = self.job_dir(job["session_id"], job["attempt_id"], job["id"]) / name
+        write_once_bytes(path, data)
+        return path
+
+    def job_file(self, job: dict[str, Any], name: str) -> Path:
+        if name not in self.JOB_FILES:
+            raise ValueError(name)
+        return self.job_dir(job["session_id"], job["attempt_id"], job["id"]) / name
+
+    def load_boundary(self, job: dict[str, Any]) -> dict[str, Any] | None:
+        path = self.job_file(job, "boundary.json")
+        return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
+
     def save_view(self, job: dict[str, Any], view: dict[str, Any]) -> None:
         atomic_write_bytes(self.job_dir(job["session_id"], job["attempt_id"], job["id"]) / "view.json", _dump(view))
 

@@ -21,6 +21,7 @@ all remain visible.
 from __future__ import annotations
 
 import io
+import json
 import shutil
 import threading
 import time
@@ -29,11 +30,15 @@ from collections import deque
 from pathlib import Path
 from typing import Any
 
+import soundfile as sf
+
 from pronunciation_lab.app.audio_input import MAX_DURATION_MS, MIN_DURATION_MS, AudioInputError, prepare_audio
 from pronunciation_lab.app.engine_compare import compare, validate_comparison
 from pronunciation_lab.app.pipeline import analyze_pipeline, build_analysis_view
+from pronunciation_lab.app.reduction import empty_reduction
 from pronunciation_lab.app.service import AnalysisService, UserError
 from pronunciation_lab.benchmark.schema import PronunciationResult
+from pronunciation_lab.reader import boundary as B
 from pronunciation_lab.reader import model as M
 from pronunciation_lab.reader.feedback import compact_feedback
 from pronunciation_lab.reader.segmenter import segment
@@ -420,7 +425,7 @@ class ReaderService:
                 self.store.save_attempt(attempt)
             self._touch(session)
 
-        state, error, view, target = "FAILED", None, None, {"state": "NOT_APPLICABLE"}
+        state, error, view, target, boundary = "FAILED", None, None, {"state": "NOT_APPLICABLE"}, None
         try:
             engine = self.analysis._instances.get(job["engine_id"])
             if engine is None:
@@ -430,6 +435,8 @@ class ReaderService:
                                             lock=self.analysis._lock,
                                             on_inference_done=lambda: self.analysis._warm.add(job["engine_id"]))
             self.store.write_result(job, result.model_dump_json())
+            # M7: only the sentence's own region is interpreted (M4/M5/target confirmation).
+            result, view, boundary = self._sentence_analysis(job, attempt, engine, path, result, view)
             self.store.save_view(job, view)
             target = confirm_target(result)
             if result.status in ("failed", "blocked"):
@@ -447,6 +454,7 @@ class ReaderService:
             M.transition(job, M.JOB_TRANSITIONS, state, "job")
             job |= {"finished_at": M.now(), "error": error, "target_confirmation": target,
                     "feedback": compact_feedback(view) if state == "SUCCEEDED" else None,
+                    "boundary": view.get("boundary") if state == "SUCCEEDED" and view else None,
                     "pipeline_versions": _versions(view)}
             self.store.save_job(job)
             if job["kind"] == "primary":
@@ -456,6 +464,90 @@ class ReaderService:
                                     state=state)
             self._touch(session)
         self.maybe_summarize(sid)
+
+    def _sentence_analysis(self, job, attempt, engine, path, result, view):
+        """M7: find the sentence's region of the attempt; if speech continues after it, analyse the region alone.
+
+        The full-attempt evidence stays in result.json. A comparison job uses the primary job's boundary
+        (the same region, so both engines describe the same audio) and keeps its own assessment as evidence.
+        """
+        sid, aid = job["session_id"], job["attempt_id"]
+        samples, sr = sf.read(path, dtype="float32", always_2d=False)
+        own = B.map_to_capture(B.detect_boundary(result, samples, sr), attempt.get("capture"))
+        boundary, source = own, "own"
+        if job["kind"] == "comparison":
+            jobs = [self.store.load_job(sid, aid, j) for j in reversed(attempt["job_ids"])]
+            primary = next((j for j in jobs if j["kind"] == "primary" and j["state"] == "SUCCEEDED"), None)
+            used = self.store.load_boundary(primary) if primary else None
+            if used is not None and not B.validate_boundary(used):
+                boundary, source = json.loads(json.dumps(used)), "primary"
+                for key in ("target_check", "other_engine", "source", "target_analysed"):
+                    boundary.pop(key, None)
+                boundary["other_engine"] = B.compare_boundaries(used, own)
+        issues = B.validate_boundary(boundary)
+        detected = boundary.get("state")
+        if issues:  # never act on an inconsistent boundary: no region is analysed as the sentence on its basis
+            boundary = B._no_boundary("NO_RELIABLE_BOUNDARY", ["the boundary evidence was inconsistent: "
+                                      + "; ".join(issues)], boundary.get("duration_ms") or len(samples) * 1000.0 / sr,
+                                      result.engine.name)
+            boundary = B.map_to_capture(boundary, attempt.get("capture"))
+        boundary |= {"source": source, "target_analysed": False, "feedback_withheld": False}
+        if boundary.get("defensible") is False:
+            # continuation, but no defensible place for the sentence's end: nothing is analysed as the sentence
+            boundary["feedback_withheld"] = True
+        if boundary["state"] == "NO_RELIABLE_BOUNDARY":
+            # the pre-M7 fallback (whole attempt) only when nothing suggests the attempt goes on
+            plausible = B.continuation_plausible(result, detected)
+            if plausible:
+                boundary["reasons"] = boundary["reasons"] + plausible
+                boundary["feedback_withheld"] = True
+        if boundary["state"] in B.NEEDS_TARGET_ANALYSIS and not boundary["feedback_withheld"]:
+            data, n = B.target_wav_bytes(path.read_bytes(), boundary["cut_ms"])
+            tpath = self._write_job_file(job, "target.wav", data)
+            tresult, tview = analyze_pipeline(engine, tpath, attempt["target_text"], recording_id=f"reader-{aid[:8]}-t",
+                                              lock=self.analysis._lock)
+            self._write_job_file(job, "target_result.json", tresult.model_dump_json().encode("utf-8"))
+            if tresult.status in ("failed", "blocked"):
+                raise UserError("engine_" + tresult.status, "The sentence could not be analysed on its own.")
+            boundary = B.check_target_analysis(boundary, tresult, samples[:n], sr)
+            boundary["target_analysed"] = True
+            result, view = tresult, tview
+        # permanent invariant: nothing M4/M5 consume may lie outside the sentence's region
+        leaks = B.evidence_outside_target(view, result, boundary["cut_ms"])
+        boundary["containment"] = {"ok": not leaks, "issues": leaks[:20], "count": len(leaks)}
+        if leaks:
+            boundary["feedback_withheld"] = True
+            boundary["reasons"] = boundary["reasons"] + [f"{len(leaks)} pieces of evidence lay outside the sentence"]
+        self._write_job_file(job, "boundary.json", M_dump(boundary))
+        if boundary["feedback_withheld"]:
+            view = _withheld_view(view)
+        view["boundary"] = self._boundary_view(attempt, job, boundary)
+        return result, view, boundary
+
+    def _write_job_file(self, job: dict[str, Any], name: str, data: bytes) -> Path:
+        """Write once; a re-run after recovery may find the same bytes already there (anything else is an error)."""
+        try:
+            return self.store.write_job_file(job, name, data)
+        except AlreadyExists:
+            path = self.store.job_file(job, name)
+            if path.read_bytes() != data:
+                raise
+            return path
+
+    @staticmethod
+    def _boundary_view(attempt: dict[str, Any], job: dict[str, Any], b: dict[str, Any]) -> dict[str, Any]:
+        """What the reader shows: the state, plain reasons, and an exact Listen window per region."""
+        regions = [{"kind": r["kind"], "start_ms": r["start_ms"], "end_ms": r["end_ms"], "speech_ms": r.get("speech_ms"),
+                    "capture_samples": r.get("capture_samples"),
+                    "play": M.playback_reference(attempt, job, [r["start_ms"], r["end_ms"]], [r["start_ms"], r["end_ms"]],
+                                                 r["kind"])}
+                   for r in b["regions"] if r["end_ms"] > r["start_ms"]]
+        other = b.get("other_engine")
+        return {"version": B.BOUNDARY_VERSION, "state": b["state"], "engine": b["engine"], "source": b["source"],
+                "cut_ms": b["cut_ms"], "duration_ms": b["duration_ms"], "target_analysed": b["target_analysed"],
+                "reasons": b["reasons"], "regions": regions, "evidence": b.get("evidence") or {},
+                "feedback_withheld": bool(b.get("feedback_withheld")), "containment": b.get("containment"),
+                "other_engine": other, "target_check": b.get("target_check")}
 
     def maybe_summarize(self, sid: str) -> dict[str, Any] | None:
         """Build the reading summary once reading is finished and every primary analysis is terminal."""
@@ -512,8 +604,21 @@ class ReaderService:
         return result
 
     def rebuild_view(self, job: dict[str, Any]) -> dict[str, Any]:
-        result = PronunciationResult.model_validate_json(self.store.result_path(job).read_text(encoding="utf-8"))
-        return build_analysis_view(result, self.store.audio_path(job["session_id"], job["attempt_id"]))
+        """Rebuild view.json from stored evidence: the sentence's own analysis when M7 made one."""
+        target = self.store.job_file(job, "target_result.json")
+        if target.is_file():
+            result = PronunciationResult.model_validate_json(target.read_text(encoding="utf-8"))
+            view = build_analysis_view(result, self.store.job_file(job, "target.wav"))
+        else:
+            result = PronunciationResult.model_validate_json(self.store.result_path(job).read_text(encoding="utf-8"))
+            view = build_analysis_view(result, self.store.audio_path(job["session_id"], job["attempt_id"]))
+        boundary = self.store.load_boundary(job)
+        if boundary is not None:
+            if boundary.get("feedback_withheld"):
+                view = _withheld_view(view)
+            attempt = self.store.load_attempt(job["session_id"], job["attempt_id"])
+            view["boundary"] = self._boundary_view(attempt, job, boundary)
+        return view
 
     # ------------------------------------------------------------------
     # recovery and shutdown
@@ -561,6 +666,26 @@ class ReaderService:
         self.worker.stop()
 
 
+def _withheld_view(view: dict[str, Any]) -> dict[str, Any]:
+    """M7: the sentence could not be separated from continued speech — no pronunciation feedback at all.
+
+    The evidence stays stored (result.json / target_result.json); only what is shown is withheld.
+    """
+    engine = (view.get("coach") or {}).get("engine") or (view.get("reduction") or {}).get("engine") or {}
+    out = {k: v for k, v in view.items() if k not in ("words", "coach", "reduction")}
+    out |= {"state": "boundary_withheld", "message": B.WITHHELD_MESSAGE, "words": [],
+            "coach": {"version": (view.get("coach") or {}).get("version"), "state": "boundary_withheld",
+                      "message": B.WITHHELD_MESSAGE, "engine": engine, "observations": [], "patterns": [], "groups": [],
+                      "practice_targets": [], "integrity": {"ok": True, "issues": []}},
+            "reduction": empty_reduction("boundary_withheld", engine)}
+    out["reduction"].pop("timing_ms", None)
+    return out
+
+
+def M_dump(obj: Any) -> bytes:
+    return json.dumps(obj, ensure_ascii=False, indent=1, sort_keys=True).encode("utf-8")
+
+
 def _sha256(data: bytes) -> str:
     import hashlib
 
@@ -570,7 +695,8 @@ def _sha256(data: bytes) -> str:
 def _versions(view: dict[str, Any] | None) -> dict[str, Any] | None:
     if not view:
         return None
-    return {"coach": (view.get("coach") or {}).get("version"), "reduction": (view.get("reduction") or {}).get("version")}
+    return {"coach": (view.get("coach") or {}).get("version"), "reduction": (view.get("reduction") or {}).get("version"),
+            "boundary": (view.get("boundary") or {}).get("version")}
 
 
 class AnalysisWorker:

@@ -45,6 +45,8 @@ def eligibility(attempt: dict[str, Any], primary: dict[str, Any] | None, engine:
         return "not analysed"
     if primary["engine_id"] != engine:
         return "analysed by another engine"
+    if (primary.get("boundary") or {}).get("feedback_withheld"):
+        return "sentence boundary uncertain"
     target = (primary.get("target_confirmation") or {}).get("state")
     if target == "MATCH":
         return None

@@ -35,8 +35,39 @@ const TARGET_TEXT = {
   MISMATCH: "This recording does not seem to be this sentence, so no pronunciation feedback is shown.",
 };
 
+// M7: what the reader says about speech that continued after the sentence (never a warning or a score)
+const BOUNDARY_TEXT = {
+  TARGET_PLUS_OVERFLOW: {
+    line: "Continued speech detected after this sentence.",
+    sub: "This continuation was not included in the pronunciation analysis.",
+  },
+  BOUNDARY_UNCERTAIN: {
+    line: "Sentence boundary uncertain — some continued speech may not be included in this sentence's analysis.",
+    sub: "",
+  },
+};
+
+/** The other engine's own boundary assessment, kept on the attempt's comparison job (null before a comparison). */
+function otherBoundary(attempt, jobs) {
+  const ids = (attempt && attempt.job_ids) || [];
+  const c = ids.map((id) => jobs[id]).filter((j) => j && j.kind === "comparison" && j.state === "SUCCEEDED").pop();
+  return (c && c.boundary && c.boundary.other_engine) || null;
+}
+
+/** The boundary note for a job, or null (sentence only / no boundary checked). */
+function boundaryNote(boundary) {
+  if (!boundary) return null;
+  // feedback withheld (no defensible boundary): the uncertain wording, never the whole attempt's feedback
+  const state = boundary.feedback_withheld ? "BOUNDARY_UNCERTAIN" : boundary.state;
+  if (!BOUNDARY_TEXT[state]) return null;
+  const regions = boundary.regions || [];
+  const after = regions.find((r) => r.kind === "overflow" || r.kind === "uncertain") || null;
+  const target = regions.find((r) => r.kind === "target") || null;
+  return { state, ...BOUNDARY_TEXT[state], after, target, withheld: !!boundary.feedback_withheld };
+}
+
 if (typeof module !== "undefined") {
-  module.exports = { feedbackLine, displayAttempt, primaryJob, TARGET_TEXT, sentencesText };
+  module.exports = { feedbackLine, displayAttempt, primaryJob, TARGET_TEXT, sentencesText, boundaryNote, BOUNDARY_TEXT, otherBoundary };
 }
 
 // --- browser ----------------------------------------------------------------------------------------
@@ -242,11 +273,24 @@ if (typeof document !== "undefined") {
     // each phrase stays together; a line may only break at " · "
     const compact = el("span", { class: "compact" });
     text.split(" · ").forEach((part, i) => { if (i) compact.append(" · "); compact.append(el("span", { class: "phrase", text: part })); });
-    note.append(compact, " ",
+    note.append(compact, " ");
+    note.append(
       el("button", { type: "button", class: "details-toggle", "aria-expanded": String(open),
         text: (open ? "▾" : "▸") + " Details", onclick: (e) => { e.stopPropagation(); toggle(S, segId); } }), " ",
       el("button", { type: "button", class: "read-again", title: "Read this sentence again (new recording)",
         "aria-label": "Read again", text: "↻", onclick: (e) => { e.stopPropagation(); window.__readerApi.readAgain(segId); } }));
+    const bn = a.state === "ANALYZED" && !(tc === "MISMATCH" && !kept) ? boundaryNote(job && job.boundary) : null;
+    if (bn) {
+      const line = el("span", { class: "boundary-note", "data-boundary": bn.state, title: bn.sub || bn.line },
+        [el("span", { class: "boundary-line", text: bn.line })]);
+      if (bn.after && bn.after.play) {
+        line.append(" ", el("button", { type: "button", class: "listen-overflow",
+          "aria-label": "Listen to the continued speech", text: "▶ Listen",
+          onclick: (e) => { e.stopPropagation(); playRef(S, bn.after.play, e.target); } }));
+      }
+      if (bn.sub) line.append(" ", el("span", { class: "boundary-sub", text: bn.sub }));
+      note.append(" ", line);
+    }
   }
 
   /** The Details block: after its sentence (and its word panel), inside the paragraph, subordinate to the article. */
@@ -381,12 +425,64 @@ if (typeof document !== "undefined") {
       body.append(sec);
     }
 
+    body.append(boundarySection(S, job, otherBoundary(a, S.snap.jobs)));
+
     const cmpBox = el("div", { class: "compare" });
     const btn = el("button", { type: "button", class: "compare-attempt", text: "Compare with the other listening model",
       onclick: () => window.__readerApi.compare(a, cmpBox, btn, R) });
     body.append(el("div", { class: "line" }, [btn, el("span", { class: "muted small",
       text: "Both models share one acoustic model; differences are shown, not resolved." })]), cmpBox);
     body.append(el("p", { class: "muted small", text: `Evidence: ${job.engine_id} · recording ${a.id.slice(0, 8)} · analysis ${job.id.slice(0, 8)}` }));
+  }
+
+  /** Details → Sentence boundary: what was analysed, Listen to each part, and the technical evidence. */
+  function boundarySection(S, job, other) {
+    const el = domEl;
+    const b = job && job.boundary;
+    const sec = el("details", { class: "boundary", "data-boundary": b ? b.state : "NONE" },
+      [el("summary", { text: "Sentence boundary" })]);
+    if (!b) { sec.append(el("p", { class: "muted small", text: "Not checked for this recording." })); return sec; }
+    const plain = {
+      TARGET_ONLY: "Only this sentence was heard in this recording; all of it was analysed.",
+      TARGET_PLUS_OVERFLOW: "Speech continued after this sentence. Only the sentence was analysed; the continuation is kept with the recording.",
+      BOUNDARY_UNCERTAIN: "Where this sentence ends is uncertain. Only the part up to the boundary was analysed; the rest is kept with the recording.",
+      NO_RELIABLE_BOUNDARY: "The end of the sentence could not be checked; the whole recording was analysed.",
+    }[b.state];
+    sec.append(el("p", { text: b.feedback_withheld
+      ? "Where this sentence ends could not be established, and speech seems to continue after it. No pronunciation feedback is shown for this recording; the recording is kept."
+      : plain }));
+    const names = { target: "▶ Listen to the sentence", overflow: "▶ Listen to the continued speech", uncertain: "▶ Listen to the uncertain part" };
+    const line = el("div", { class: "line" });
+    for (const r of b.regions || []) {
+      if (b.regions.length < 2 || !r.play) continue;
+      line.append(el("button", { type: "button", class: "listen-region", "data-region": r.kind, text: names[r.kind],
+        onclick: (ev) => playRef(S, r.play, ev.target) }), " ");
+    }
+    if (line.childNodes.length) sec.append(line);
+    const ev = b.evidence || {};
+    const ms = (v) => (typeof v === "number" ? `${Math.round(v)} ms` : "—");
+    const rows = [
+      ["Decision", `${b.state} (${b.engine}${b.source === "primary" ? ", the first model's boundary" : ""})`],
+      ["Boundary", `${ms(b.cut_ms)} of ${ms(b.duration_ms)}`],
+      ["Last sound of the sentence", `${ms(ev.last_target_ms)} (“${ev.last_target_word || "—"}”)`],
+      ["Final word decoded", ev.final_word_decoded ? `${ev.final_word_decoded} sounds of “${ev.final_word}”` : "—"],
+      ["Sounds decoded after it", ev.post_phones === undefined ? "—" : String(ev.post_phones)],
+      ["Speech-like sound after it", ms(ev.speech_after_ms)],
+      ["Gap before the continuation", ms(ev.gap_ms)],
+    ];
+    const tech = el("details", { class: "boundary-evidence" }, [el("summary", { text: "Evidence" })]);
+    const dl = el("dl", { class: "small" });
+    for (const [k, v] of rows) dl.append(el("dt", { text: k }), el("dd", { text: v }));
+    tech.append(dl);
+    const reasons = el("ul", { class: "small" });
+    for (const r of b.reasons || []) reasons.append(el("li", { text: r }));
+    tech.append(reasons);
+    if (other) {
+      tech.append(el("p", { class: "small other-boundary", text: `${other.engine}, on its own: ${other.state} at ${ms(other.cut_ms)}`
+        + (other.differs ? " — the models differ here." : " — the same boundary.") + " " + other.note }));
+    }
+    sec.append(tech);
+    return sec;
   }
 
   function update(S, snap) {
