@@ -161,10 +161,79 @@ function fluencyItemText(o) {
 const STRENGTH_TEXT = { moderate: "evidence: moderate", low: "evidence: low", ambiguous: "evidence: ambiguous",
   insufficient: "evidence: insufficient" };
 
+// M9: "What to practise now" — 0–3 actions; the concise view, built only from the coaching contract.
+const COACHING_UNAVAILABLE = "Practice suggestions are not available right now.";
+
+function coachingView(c) {
+  if (!c) return { state: "none", actions: [], message: null };
+  if (c.state === "unavailable") return { state: "unavailable", actions: [], message: COACHING_UNAVAILABLE };
+  if (c.state !== "actions") {
+    const na = c.no_action || {};
+    return { state: "no_action", actions: [], message: na.message || null, help: na.what_would_help || null };
+  }
+  return {
+    state: "actions",
+    actions: c.actions.map((a) => ({
+      rank: a.rank_in_plan, title: a.action_text, minutes: a.time_minutes, why: a.why.text,
+      steps: a.practice.steps.map((st) => st.text),
+      examples: a.practice.examples.slice(0, 3).map((e) => ({ label: e.word || e.label || "this moment", ref: e })),
+      retest: a.practice.retest_sentences.map((r) => ({ text: r.text, ref: r.ref })),
+      transfer: a.transfer && a.transfer.text,
+    })),
+    message: null,
+  };
+}
+
+// M9 "This reading": what happened in this article — a description, scoped to this reading, never advice.
+const READING_SCOPE = "This reading only";
+const COACHING_SCOPE = "Based on your recent readings";
+
+// Order inside "This reading": major improvement areas → already stable → fluency → cautions.
+function readingView(rf) {
+  if (!rf || rf.state === "unavailable") return { state: rf ? "unavailable" : "none", areas: [], strengths: [], fluency: [], cautions: [] };
+  const areas = (rf.improvement_areas || []).map((a, k) => ({
+    rank: k + 1, kind: a.kind, band: a.band, text: a.text,
+    scope: a.pattern_scope, label: a.pattern_label,
+    observations: a.evidence_text, pattern: a.pattern_text || null,
+    rate: [a.rate_text, a.counter_text].filter(Boolean).join(" ") || null,
+    why: a.order_text || null,
+    examples: (a.examples || []).slice(0, 3), counterExamples: (a.counter_examples || []).slice(0, 2),
+  }));
+  const fluency = [];
+  if (rf.fluency) fluency.push({ text: rf.fluency.text, examples: (rf.fluency.examples || []).slice(0, 3) });
+  if (rf.fluency_note) fluency.push({ text: rf.fluency_note.text, examples: [] });
+  return {
+    state: rf.state, areas, noArea: rf.no_area_text || null,
+    other: (rf.other_differences && rf.other_differences.note) || null,
+    strengths: (rf.strengths || []).map((s) => ({ text: s.text, examples: s.examples || [] })),
+    fluency, cautions: (rf.cautions || []).map((c) => c.text),
+  };
+}
+
+/** The expandable evidence of one action, as lines (measured / counted / inferred / knowledge kept apart). */
+function actionEvidenceLines(a) {
+  const m = a.why.measures;
+  const lines = [
+    `Observed: ${m.confident} confident observations in ${m.conf_sessions} sessions, ${m.conf_sentences} sentences` +
+      (m.conf_words ? `, ${m.conf_words} words` : "") + (m.supporting ? ` (plus ${m.supporting} ambiguous, as support only)` : "") + ".",
+  ];
+  if (m.counter) lines.push(`Heard as expected: ${m.counter} other occurrences.`);
+  if (m.concentration != null) {
+    lines.push(m.concentration >= 0.995 ? "All confident differences of these sounds point this way."
+      : `About ${Math.round(m.concentration * 10)} in 10 confident differences of these sounds point this way.`);
+  }
+  lines.push(`Hypothesis (inferred): ${a.target.hypothesis}`);
+  for (const k of a.knowledge_contributions) lines.push(`Knowledge (general, not about you): ${k.text}`);
+  for (const d of a.why.decided_by) lines.push(`Chosen over ${d.loser} — ${d.criterion_label}: ${d.winner_value} vs ${d.loser_value}.`);
+  if (a.transfer && a.transfer.text) lines.push(`Possible transfer (not measured): ${a.transfer.text}`);
+  return lines;
+}
+
 if (typeof module !== "undefined") {
   module.exports = { feedbackLine, displayAttempt, primaryJob, TARGET_TEXT, NOTE_IDENTITY, identityOf, sentencesText, boundaryNote, BOUNDARY_TEXT,
     otherBoundary, fluencyLine, rateText, fluencyItems, fluencyItemText, STRENGTH_TEXT, readingLines, spanText, listenTitle,
-    boundaryPlainText, BOUNDARY_CONFIDENCE_TEXT };
+    boundaryPlainText, BOUNDARY_CONFIDENCE_TEXT, coachingView, actionEvidenceLines, COACHING_UNAVAILABLE,
+    readingView, READING_SCOPE, COACHING_SCOPE };
 }
 
 // --- browser ----------------------------------------------------------------------------------------
@@ -172,10 +241,12 @@ if (typeof document !== "undefined") {
   const buffers = new Map(); // attempt_id → AudioBuffer of its analysis WAV
   let audioCtx = null, source = null;
 
-  async function attemptBuffer(S, attemptId) {
+  async function attemptBuffer(S, attemptId, ref) {
     if (!buffers.has(attemptId)) {
       audioCtx = audioCtx || new AudioContext();
-      const data = await (await fetch(`/api/sessions/${S.sessionId}/attempts/${attemptId}/audio`)).arrayBuffer();
+      // M9 examples come from other sessions: the reference names its own session (and audio url)
+      const url = (ref && ref.url) || `/api/sessions/${(ref && ref.session_id) || S.sessionId}/attempts/${attemptId}/audio`;
+      const data = await (await fetch(url)).arrayBuffer();
       buffers.set(attemptId, await audioCtx.decodeAudioData(data));
     }
     return buffers.get(attemptId);
@@ -184,7 +255,7 @@ if (typeof document !== "undefined") {
   /** Play one window of one attempt; the reference identifies exactly what is heard. */
   async function playRef(S, ref, node) {
     S.lastPlayback = ref;
-    const buf = await attemptBuffer(S, ref.attempt_id);
+    const buf = await attemptBuffer(S, ref.attempt_id, ref);
     if (audioCtx.state === "suspended") await audioCtx.resume();
     if (source) { try { source.stop(); } catch (e) { /* already stopped */ } }
     document.querySelectorAll(".drawer .playing, .seg.playing").forEach((n) => n.classList.remove("playing"));
@@ -709,6 +780,50 @@ if (typeof document !== "undefined") {
     return box;
   }
 
+  /** M9 actions (0–3): concise card per action; evidence on request; emerging items never shown here. */
+  function renderCoaching(S, box, coaching) {
+    const el = domEl;
+    const v = coachingView(coaching);
+    box.querySelectorAll(".coach-actions, .coach-none").forEach((n) => n.remove());
+    if (v.state !== "actions") {
+      if (v.message) box.append(el("div", { class: "coach-none" }, [el("p", { text: v.message }),
+        ...(v.help ? [el("p", { class: "muted small", text: v.help })] : [])]));
+      return v;
+    }
+    const list = el("ol", { class: "coach-actions" });
+    v.actions.forEach((a, i) => {
+      const raw = coaching.actions[i];
+      const listen = (ref, label) => el("button", { type: "button", class: "play-example coach-listen", text: `▶ ${label}`,
+        title: ref.span_ms ? listenTitle({ start_ms: ref.span_ms[0], end_ms: ref.span_ms[1], playback: { context_ms: ref.context_ms } }) : "",
+        onclick: (ev) => playRef(S, ref, ev.target) });
+      const steps = el("ol", { class: "coach-steps small" });
+      a.steps.forEach((t) => steps.append(el("li", { text: t })));
+      const evidence = el("details", { class: "coach-evidence" }, [el("summary", { text: "Evidence" })]);
+      const ul = el("ul", { class: "small" });
+      actionEvidenceLines(raw).forEach((t) => ul.append(el("li", { text: t })));
+      evidence.append(ul);
+      const counter = raw.practice.counter_examples.slice(0, 3);
+      if (counter.length) evidence.append(el("p", { class: "small" }, ["Heard as expected: ",
+        ...counter.map((r) => listen(r, r.word || "example"))]));
+      const guidance = raw.practice.guidance;
+      if (guidance.length) evidence.append(el("p", { class: "small muted", text: `${guidance.map((g) => g.text).join(" ")} (${raw.practice.guidance_note})` }));
+      const readBtn = el("button", { type: "button", class: "coach-read", text: "Read these now",
+        onclick: () => window.__readerApi && window.__readerApi.startPractice(a.retest.map((r) => r.text), a.title) });
+      list.append(el("li", { class: "coach-action", "data-target": raw.target.target_id, "data-kind": raw.target.kind }, [
+        el("div", { class: "row" }, [el("strong", { class: "coach-title", text: a.title }),
+          el("span", { class: "muted small", text: `about ${a.minutes} min` })]),
+        el("p", { class: "coach-why", text: a.why }),
+        el("details", { class: "coach-practise" }, [el("summary", { text: "Practise" }), steps]),
+        el("p", { class: "coach-examples small" }, ["Your examples: ", ...a.examples.map((e) => listen(e.ref, e.label))]),
+        el("div", { class: "coach-retest small" }, [el("span", { text: "Retest: " }),
+          ...a.retest.map((r) => listen(r.ref, r.text.length > 48 ? r.text.slice(0, 46) + "…" : r.text)), readBtn]),
+        evidence,
+      ]));
+    });
+    box.append(list);
+    return v;
+  }
+
   function renderSummary(S, snap) {
     const el = domEl;
     const box = document.getElementById("summary");
@@ -733,6 +848,68 @@ if (typeof document !== "undefined") {
     }
     if (cov.not_included.length) {
       box.append(el("p", { class: "muted small", text: "Not in the feedback: " + cov.not_included.map((x) => `sentence ${x.sentence} (${x.reason})`).join(", ") }));
+    }
+    if (snap.reading_feedback) {
+      const rv = readingView(snap.reading_feedback);
+      const sec = el("section", { class: "summary-group this-reading", "data-group": "this_reading" },
+        [el("h3", { text: "This reading" }), el("p", { class: "muted small scope", text: READING_SCOPE })]);
+      const listen = (ref, label) => el("button", { type: "button", class: "play-example reading-listen", text: `▶ ${label}`,
+        onclick: (ev) => playRef(S, ref, ev.target) });
+      if (rv.state === "unavailable") sec.append(el("p", { class: "muted", text: "A description of this reading is not available." }));
+      const sub = (id, title) => el("div", { class: "reading-sub", "data-sub": id }, [el("h4", { text: title })]);
+      const exampleLabel = (e) => (e.word || e.label || "listen") + (e.evidence === "ambiguous" ? " (ambiguous)" : "");
+      if (rv.state === "feedback") {
+        const areas = sub("areas", "Major improvement areas");
+        if (rv.areas.length) {
+          const ol = el("ol", { class: "reading-areas" });
+          for (const a of rv.areas) {
+            ol.append(el("li", { class: "reading-area", "data-kind": a.kind, "data-band": a.band }, [
+              el("span", { class: "reading-headline", text: a.text }), " ",
+              el("span", { class: "chip reading-scope", "data-scope": a.scope, text: a.label }),
+              el("p", { class: "small reading-observations", text: a.observations }),
+              ...(a.pattern ? [el("p", { class: "small reading-pattern", text: a.pattern })] : []),
+              ...(a.rate ? [el("p", { class: "muted small reading-rate", text: a.rate })] : []),
+              ...(a.why ? [el("p", { class: "muted small reading-why", text: a.why })] : []),
+              el("div", { class: "reading-listen-row" }, [
+                ...a.examples.map((e) => listen(e, exampleLabel(e))),
+                ...(a.counterExamples.length ? [el("span", { class: "muted small", text: " heard as expected: " })] : []),
+                ...a.counterExamples.map((e) => listen(e, e.word || "listen")),
+              ]),
+            ]));
+          }
+          areas.append(ol);
+        } else if (rv.noArea) {
+          areas.append(el("p", { class: "reading-no-area", text: rv.noArea }));
+        }
+        if (rv.other) areas.append(el("p", { class: "muted small", text: rv.other }));
+        sec.append(areas);
+      }
+      if (rv.strengths.length) {
+        const st = sub("strengths", "Already stable in this reading");
+        const ul = el("ul", { class: "reading-strengths" });
+        for (const s of rv.strengths) ul.append(el("li", { class: "reading-strength" }, [el("span", { text: s.text }), " ",
+          ...s.examples.map((e) => listen(e, e.word || "listen"))]));
+        st.append(ul);
+        sec.append(st);
+      }
+      if (rv.fluency.length) {
+        const fl = sub("fluency", "Fluency");
+        for (const f of rv.fluency) fl.append(el("p", { class: "reading-fluency" }, [el("span", { text: f.text }), " ",
+          ...f.examples.map((e) => listen(e, e.word || e.label || "listen"))]));
+        sec.append(fl);
+      }
+      if (rv.cautions.length) {
+        const ca = sub("cautions", "Cautions");
+        for (const c of rv.cautions) ca.append(el("p", { class: "muted small reading-caution", text: c }));
+        sec.append(ca);
+      }
+      box.append(sec);
+    }
+    if (snap.coaching) {
+      const practice = el("section", { class: "summary-group practice-now", "data-group": "practice_now" },
+        [el("h3", { text: "What to practise now" }), el("p", { class: "muted small scope", text: COACHING_SCOPE })]);
+      renderCoaching(S, practice, snap.coaching);
+      box.append(practice);
     }
     const byId = Object.fromEntries(sum.patterns.map((p) => [p.id, p]));
     for (const g of sum.groups) {
@@ -779,15 +956,7 @@ if (typeof document !== "undefined") {
       sec.append(el("p", { class: "muted small", text: "Counts of moments to listen to, not a judgement of the reading: pauses and repeats can be natural or intentional." }));
       box.append(sec);
     }
-    if (sum.practise.length) {
-      const sec = el("section", { class: "summary-group", "data-group": "practise" }, [el("h3", { text: "Sounds worth practising" })]);
-      for (const t of sum.practise) {
-        sec.append(el("div", { class: "coach-card" }, [el("strong", { class: "ipa", text: `/${t.target}/ vs /${t.contrast}/` }),
-          ...(t.guidance ? [el("p", { class: "small", text: t.guidance }), el("p", { class: "muted small", text: t.guidance_note })] : []),
-          exampleButtons(S, t.examples)]));
-      }
-      box.append(sec);
-    }
+    // M9 replaces the unbounded "Sounds worth practising" list (the summary data keeps it, unchanged).
     if (!sum.groups.length && !sum.reductions.length) box.append(el("p", { text: "Nothing stood out across the sentences included." }));
     const cav = el("details", {}, [el("summary", { text: "How to read this" })]);
     const ul = el("ul");
@@ -799,6 +968,6 @@ if (typeof document !== "undefined") {
   const baseUpdate = update;
   function updateAll(S, snap) { baseUpdate(S, snap); renderSummary(S, snap); }
 
-  window.ReaderFeedback = { update: updateAll, renderNote, annotate, toggle, renderDrawer, renderSummary, closeWord,
+  window.ReaderFeedback = { update: updateAll, renderNote, annotate, toggle, renderDrawer, renderSummary, closeWord, renderCoaching,
     renderFluencyComparison };
 }

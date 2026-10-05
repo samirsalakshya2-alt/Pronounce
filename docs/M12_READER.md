@@ -234,6 +234,18 @@ line built from the summarised sentences only. It has the number of fluency thin
 sentences, what recurs across sentences, and the range of speech rates. Up to three ▶ moments follow, each
 playing an exact window with its stated context. It is never a score; see `docs/M8_FLUENCY_DISFLUENCY.md`.
 
+**Order of *Your reading*.** Coverage lines, then **This reading** ("This reading only": a current-reading
+diagnosis of this session's summarised sentences: *Major improvement areas* (every qualifying one, in
+Pareto order, or "No major pronunciation
+pattern was strong enough to call out in this reading."), *Already stable in this reading*, *Fluency*,
+*Cautions*), then **What to practise now** ("Based on your recent readings", unchanged), then the detailed
+report. See `docs/M9_PARETO_COACHING.md`.
+
+**What to practise now (M9).** In *Your reading*, the 0–3 practice actions issued when the summary
+was built (stored as `coaching.json`, so reopening never changes them). They replace the previous unbounded
+"Sounds worth practising" list in the UI. The summary data (`practise`, `patterns`, `reductions`, `fluency`)
+is unchanged. See `docs/M9_PARETO_COACHING.md`.
+
 **MATCH + BOUNDARY_UNCERTAIN** is a valid state: "Your reading appears to match this sentence, but I couldn't
 safely determine where it ended."
 

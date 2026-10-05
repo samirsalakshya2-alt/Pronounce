@@ -193,3 +193,33 @@ button.stop { color: var(--rec); border-color: color-mix(in srgb, var(--rec) 40%
 .fluency-summary, .fluency-rate { margin: 6px 0; }
 .listen-fluency, .listen-fluency-continued { font: inherit; color: var(--accent); background: none; border: 0; padding: 0 2px; cursor: pointer; }
 .fluency-compare { margin-top: 8px; }
+
+/* M9 — What to practise now: few actions, concise; evidence on request */
+.practice-now .coach-actions { list-style: none; padding: 0; margin: 8px 0 0; counter-reset: action; }
+.practice-now .coach-action { border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; margin: 0 0 12px; }
+.practice-now .coach-action .row { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; justify-content: space-between; }
+.practice-now .coach-title { font-size: 1.05em; }
+.practice-now .coach-why { margin: 6px 0; }
+.practice-now .coach-steps { margin: 6px 0 6px 18px; padding: 0; }
+.practice-now .coach-examples, .practice-now .coach-retest { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin: 6px 0; }
+.practice-now .coach-listen { font-size: 0.9em; }
+.practice-now .coach-read { margin-left: auto; }
+.practice-now .coach-evidence ul { margin: 6px 0 6px 18px; padding: 0; }
+.practice-now .coach-none p { margin: 4px 0; }
+
+/* M9 "This reading": major improvement areas → already stable → fluency → cautions, above the practice suggestions */
+.this-reading .reading-sub { margin: 10px 0 4px; }
+.this-reading .reading-sub h4 { margin: 0 0 4px; font-size: 0.95em; }
+.this-reading .reading-areas { padding-left: 22px; margin: 4px 0; }
+.this-reading .reading-area { margin: 8px 0; line-height: 1.5; }
+.this-reading .reading-area .reading-headline { font-weight: 600; }
+.this-reading .reading-area p { margin: 2px 0; }
+.this-reading .reading-scope { font-size: 0.75em; vertical-align: middle; }
+.this-reading .reading-scope[data-scope="word"], .this-reading .reading-scope[data-scope="possible"] { opacity: 0.8; }
+.this-reading .reading-listen { font-size: 0.85em; margin: 2px 4px 2px 0; }
+.this-reading .reading-strengths { list-style: none; padding: 0; margin: 4px 0; }
+.this-reading .reading-strength { margin: 4px 0; }
+.this-reading .reading-strength span::before { content: "✓ "; color: var(--muted, #888); }
+.this-reading .reading-sub[data-sub="strengths"] h4, .this-reading .reading-sub[data-sub="fluency"] h4,
+.this-reading .reading-sub[data-sub="cautions"] h4 { font-weight: 500; color: var(--muted, #666); }
+.summary-group .scope, .practice-now .scope { margin: -4px 0 8px; }

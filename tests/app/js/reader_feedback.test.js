@@ -127,4 +127,75 @@ assert.ok(!/could not be established|could not be separated/.test(leaked) && /se
 assert.equal(F.boundaryPlainText({ feedback_withheld: false, withheld_reason: null, boundary_confidence: "supported" }, "plain"), "plain");
 assert.ok(/pause/.test(F.BOUNDARY_CONFIDENCE_TEXT.supported) && !/unclear/.test(F.BOUNDARY_CONFIDENCE_TEXT.supported));
 assert.match(F.BOUNDARY_CONFIDENCE_TEXT.insufficient, /not established/);
+// M9: What to practise now — concise view from the contract; evidence lines keep their origins apart
+const ref = (w) => ({ session_id: "s", attempt_id: "a", timeline: "analysis_wav", play_ms: [100, 400], span_ms: [160, 340],
+  url: "/api/sessions/s/attempts/a/audio", word: w });
+const action = { rank_in_plan: 1, action_text: "Practise telling /ɪ/ and /iː/ apart", time_minutes: 12,
+  why: { text: "In 3 sessions, /ɪ/ was heard as /iː/ 6 times across 4 words.", decided_by: [
+    { winner: "contrast:iː~ɪ", loser: "contrast:s~ʃ", criterion_label: "breadth (different sentences)", winner_value: 6, loser_value: 3 }],
+    measures: { confident: 6, conf_sessions: 3, conf_sentences: 6, conf_words: 4, supporting: 2, counter: 12, concentration: 0.75 } },
+  target: { target_id: "contrast:iː~ɪ", kind: "CONTRAST", hypothesis: "/ɪ/ was often heard as /iː/ in your recent readings." },
+  transfer: { origin: "hypothesised", text: "Practising this may also help other words; this is a possibility, not something measured." },
+  knowledge_contributions: [{ origin: "knowledge", text: "/ɪ/ is usually short; /iː/ longer." }],
+  practice: { steps: [{ text: "Listen" }, { text: "Contrast" }], examples: [ref("sit"), ref("list"), ref("fill"), ref("bit")],
+    counter_examples: [ref("sit")], retest_sentences: [{ text: "Sentence one.", ref: ref(null) }], guidance: [], guidance_note: null } };
+let cv = F.coachingView({ state: "actions", actions: [action], detail: { listen_check: [{ target_id: "x" }] } });
+assert.equal(cv.state, "actions");
+assert.equal(cv.actions.length, 1);
+assert.deepEqual(cv.actions[0].examples.map((e) => e.label), ["sit", "list", "fill"]);   // at most three
+assert.deepEqual(cv.actions[0].steps, ["Listen", "Contrast"]);
+assert.ok(!JSON.stringify(cv).includes("listen_check"));                              // emerging never in the view
+cv = F.coachingView({ state: "no_action", actions: [], no_action: { code: "single_session", message: "Not enough evidence.", what_would_help: "Read again." } });
+assert.deepEqual([cv.state, cv.message, cv.help], ["no_action", "Not enough evidence.", "Read again."]);
+assert.equal(F.coachingView({ state: "unavailable", actions: [] }).message, F.COACHING_UNAVAILABLE);
+assert.equal(F.coachingView(null).state, "none");
+const lines = F.actionEvidenceLines(action);
+assert.ok(lines[0].startsWith("Observed: 6 confident observations in 3 sessions, 6 sentences, 4 words (plus 2 ambiguous"));
+assert.ok(lines.includes("About 8 in 10 confident differences of these sounds point this way."));
+assert.ok(lines.some((l) => l.startsWith("Hypothesis (inferred): ")));
+assert.ok(lines.some((l) => l.startsWith("Knowledge (general, not about you): ")));
+assert.ok(lines.some((l) => l.startsWith("Possible transfer (not measured): ")));
+assert.ok(lines.some((l) => l === "Chosen over contrast:s~ʃ — breadth (different sentences): 6 vs 3."));
+for (const banned of ["score", "wrong", "error", "%", "rank"]) assert.ok(!lines.join(" ").toLowerCase().includes(banned), banned);
+// M9 "This reading": improvement areas first, then strengths, fluency, cautions; scoped, never actions
+const rfx = { scope: "this_reading", state: "feedback",
+  improvement_areas: [{ kind: "CONTRAST", band: "mixed", text: "In this reading, /ɛ/ was heard as /ɪ/ 3 times in 3 sentences.",
+    pattern_scope: "sound", pattern_label: "Recurring sound pattern",
+    evidence_text: "Individual observations: 3 observed differences in 3 words: 2 clear (2 high-confidence, 0 moderate-confidence) and 1 ambiguous.",
+    pattern_text: "Pattern: recurring, partly ambiguous. Heard clearly twice in the same direction, in 2 sentences and 2 words, supported by 1 ambiguous observation that is not counted as clear.",
+    order_text: null, rate_text: "Clear-evidence rate: 2 of 13 occurrences of /ɛ/.",
+    counter_text: "/ɛ/ was heard as expected 10 times in this reading.",
+    examples: [ref("best"), ref("spell"), Object.assign(ref("level"), { evidence: "ambiguous" }), ref("west")], counter_examples: [ref("bed")] }],
+  no_area_text: null,
+  strengths: [{ text: "In this reading, /θ/ was heard as expected in 12 of 12 occurrences.", examples: [] }],
+  fluency: { text: "In this reading, possible hesitation pauses were noticed inside phrases twice, in 2 sentences.", examples: [] },
+  fluency_note: null,
+  cautions: [{ code: "level_unmeasurable", text: "The speech level could not be measured in 1 sentence, so pauses there are not described." }],
+  other_differences: { count: 3, note: "3 other differences in this reading (1 clear, 2 ambiguous) did not form a pattern strong enough to call out; the detailed report below lists them." } };
+const rv = F.readingView(rfx);
+assert.equal(rv.state, "feedback");
+assert.equal(rv.areas.length, 1);
+assert.equal(rv.areas[0].rank, 1);
+assert.equal(rv.areas[0].band, "mixed");
+assert.equal(rv.areas[0].examples.length, 3);
+assert.ok(rv.areas[0].observations.includes("2 clear (") && rv.areas[0].observations.includes("1 ambiguous"));
+assert.ok(rv.areas[0].pattern.startsWith("Pattern: ") && rv.areas[0].rate.startsWith("Clear-evidence rate: 2 of 13"));
+assert.equal(rv.areas[0].scope, "sound");
+assert.equal(rv.areas[0].label, "Recurring sound pattern");
+assert.equal(rv.areas[0].why, null);
+assert.equal(rv.strengths.length, 1);
+assert.equal(rv.fluency.length, 1);
+assert.equal(rv.cautions.length, 1);
+assert.equal(rv.noArea, null);
+assert.ok(rv.other.startsWith("3 other"));
+assert.ok(rv.areas.every((a) => a.text.startsWith("In this reading")));
+assert.ok(!JSON.stringify(rv).includes("Practise"));
+const none = F.readingView(Object.assign({}, rfx, { improvement_areas: [], no_area_text: "No major pronunciation pattern was strong enough to call out in this reading." }));
+assert.equal(none.areas.length, 0);
+assert.ok(none.noArea.startsWith("No major pronunciation pattern"));
+assert.equal(none.strengths.length, 1);           // strengths still shown, never in the areas' place
+assert.equal(F.readingView({ state: "unavailable" }).state, "unavailable");
+assert.equal(F.readingView(null).state, "none");
+assert.equal(F.READING_SCOPE, "This reading only");
+assert.equal(F.COACHING_SCOPE, "Based on your recent readings");
 console.log("ok reader-feedback tests");
