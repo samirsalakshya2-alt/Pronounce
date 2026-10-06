@@ -6,12 +6,13 @@
   else root.PronounceBrowserStore = api;
 })(globalThis, function () {
   const DEFAULT_DATABASE_NAME = "pronunciation-lab";
-  const DATABASE_VERSION = 1;
+  const DATABASE_VERSION = 2;
   const STORES = {
     articles: "id",
     sessions: "id",
     attempts: ["session_id", "id"],
     jobs: ["session_id", "attempt_id", "id"],
+    recordings: ["session_id", "attempt_id"],
     views: ["session_id", "attempt_id", "job_id"],
     summaries: "session_id",
     coaching: "session_id",
@@ -172,8 +173,31 @@
       await this._put("attempts", attempt);
     }
 
+    async attempts(sessionId) {
+      return (await this._read("attempts", (store) => store.getAll()))
+        .filter((attempt) => attempt.session_id === sessionId)
+        .sort((a, b) => String(a.created_at || "").localeCompare(String(b.created_at || "")) ||
+          a.id.localeCompare(b.id));
+    }
+
     async loadAttempt(sessionId, attemptId) {
       return this._load("attempts", [sessionId, attemptId]);
+    }
+
+    async saveRecording(sessionId, attemptId, blob, filename) {
+      if (!(blob instanceof Blob)) throw new TypeError("Recording must be a Blob");
+      await this._put("recordings", {
+        session_id: sessionId,
+        attempt_id: attemptId,
+        blob,
+        filename: String(filename || "recording"),
+        mime_type: blob.type || "application/octet-stream",
+      });
+    }
+
+    async loadRecording(sessionId, attemptId) {
+      const row = await this._read("recordings", (store) => store.get([sessionId, attemptId]));
+      return row === undefined ? null : row;
     }
 
     async saveJob(job) {

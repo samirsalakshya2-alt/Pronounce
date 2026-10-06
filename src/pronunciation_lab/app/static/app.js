@@ -507,7 +507,11 @@ if (typeof document !== "undefined" && document.getElementById("analyze-btn")) {
   const state = {
     status: null, tab: "record", recordedBlob: null, recorder: null, chunks: [],
     view: null, audioCtx: null, buffer: null, source: null, selectedWord: null, notes: {},
+    browserStore: null, browserSession: null, localPayload: null, localAttempt: null, localJob: null,
+    localRecording: null, localAnalysis: false,
   };
+  const LOCAL_SESSION_ID = "browser-analysis-session";
+  const ENGINE_IDS = ["openpronounce", "wav2vec2_raw"];
 
   const el = domEl;
   const { patternCard, fillEvidence, fillPractice, reductionCard, renderComparison, wordDetail } = createEvidenceRenderers({
@@ -527,7 +531,10 @@ if (typeof document !== "undefined" && document.getElementById("analyze-btn")) {
     try { data = await res.json(); } catch (e) { /* non-JSON */ }
     if (!res.ok) {
       const msg = data && data.error ? data.error.message : "Request failed (" + res.status + ").";
-      throw new Error(msg);
+      const error = new Error(msg);
+      error.code = data && data.error && data.error.code;
+      error.status = res.status;
+      throw error;
     }
     return data;
   }
@@ -557,9 +564,30 @@ if (typeof document !== "undefined" && document.getElementById("analyze-btn")) {
   }
 
   function updateEngineNote() {
+    if (state.tab !== "benchmark") {
+      $("engine-note").textContent = "Browser recordings and uploads run both local engines independently and are saved in this browser.";
+      return;
+    }
     const id = $("engine-select").value;
     const e = state.status.engines.find((x) => x.id === id);
     $("engine-note").textContent = e && e.note ? e.note : "";
+  }
+
+  async function initializeBrowserStore() {
+    const { BrowserStore } = window.PronounceBrowserStore;
+    state.browserStore = await BrowserStore.open();
+    try {
+      state.browserSession = await state.browserStore.loadSession(LOCAL_SESSION_ID);
+    } catch (error) {
+      if (!error || error.name !== "RecordNotFoundError") throw error;
+      state.browserSession = { id: LOCAL_SESSION_ID, state: "active", created_at: new Date().toISOString() };
+      try {
+        await state.browserStore.createSession(state.browserSession);
+      } catch (createError) {
+        if (!createError || createError.name !== "DuplicateRecordError") throw createError;
+        state.browserSession = await state.browserStore.loadSession(LOCAL_SESSION_ID);
+      }
+    }
   }
 
   // --- tabs ------------------------------------------------------------------
@@ -568,6 +596,7 @@ if (typeof document !== "undefined" && document.getElementById("analyze-btn")) {
     document.querySelectorAll(".tab").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
     document.querySelectorAll(".tab-body").forEach((b) => (b.hidden = b.dataset.body !== tab));
     if (tab === "benchmark") fillBenchmarkText();
+    updateEngineNote();
   }
 
   function fillBenchmarkText() {
@@ -616,6 +645,149 @@ if (typeof document !== "undefined" && document.getElementById("analyze-btn")) {
   }
 
   // --- analysis --------------------------------------------------------------
+  function localId() {
+    return crypto.randomUUID().replace(/-/g, "");
+  }
+
+  async function persistLocalState(attempt, job, nextState) {
+    const now = new Date().toISOString();
+    job.state = nextState;
+    job.updated_at = now;
+    job.state_history.push({ state: nextState, at: now });
+    attempt.state = nextState;
+    const started = performance.now();
+    await state.browserStore.saveJob(job);
+    await state.browserStore.saveAttempt(attempt);
+    job.timings.persistence_ms += performance.now() - started;
+  }
+
+  function engineProcessingTimes(payload) {
+    return Object.fromEntries(ENGINE_IDS.map((engineId) => {
+      const timing = payload.analyses[engineId].evidence?.processing;
+      const value = timing && Number.isFinite(timing.wall_time_ms) ? timing.wall_time_ms : null;
+      return [engineId, value];
+    }));
+  }
+
+  async function analyzeLocally(text, blob, filename) {
+    const attemptId = localId();
+    const jobId = localId();
+    const now = new Date().toISOString();
+    const attempt = {
+      id: attemptId,
+      session_id: state.browserSession.id,
+      target_text: text,
+      created_at: now,
+      state: "queued",
+      job_ids: [jobId],
+      analysis_result: null,
+    };
+    const job = {
+      id: jobId,
+      session_id: state.browserSession.id,
+      attempt_id: attemptId,
+      state: "queued",
+      created_at: now,
+      updated_at: now,
+      state_history: [{ state: "queued", at: now }],
+      result: null,
+      error: null,
+      timings: { request_ms: null, persistence_ms: 0, engine_wall_time_ms: null },
+    };
+    const persistenceStarted = performance.now();
+    await state.browserStore.saveRecording(state.browserSession.id, attemptId, blob, filename);
+    await state.browserStore.saveAttempt(attempt);
+    await state.browserStore.saveJob(job);
+    job.timings.persistence_ms += performance.now() - persistenceStarted;
+
+    try {
+      await persistLocalState(attempt, job, "uploading");
+      const form = new FormData();
+      form.append("target_text", text);
+      form.append("audio", blob, filename);
+      await persistLocalState(attempt, job, "analyzing");
+      const requestStarted = performance.now();
+      const payload = await api("/api/stateless/analyze", { method: "POST", body: form });
+      job.timings.request_ms = performance.now() - requestStarted;
+      if (!payload || !payload.analyses || ENGINE_IDS.some((id) => !payload.analyses[id])) {
+        throw new Error("The analysis service returned an incomplete response.");
+      }
+      job.timings.engine_wall_time_ms = engineProcessingTimes(payload);
+      job.result = payload;
+      attempt.analysis_result = payload;
+      await persistLocalState(attempt, job, "complete");
+      await state.browserStore.saveJob(job);
+      await state.browserStore.saveAttempt(attempt);
+      await displayLocalResult(attempt, job, blob);
+      $("local-analysis-timing").hidden = false;
+      $("local-analysis-timing").textContent =
+        `Browser request: ${Math.round(job.timings.request_ms)} ms · local persistence: ` +
+        `${Math.round(job.timings.persistence_ms)} ms · engine wall times: ` +
+        ENGINE_IDS.map((id) => `${id} ${job.timings.engine_wall_time_ms[id] === null
+          ? "unavailable" : Math.round(job.timings.engine_wall_time_ms[id]) + " ms"}`).join(" · ");
+      return { attempt, job };
+    } catch (error) {
+      const message = error && error.message ? error.message : "The analysis request failed.";
+      job.error = { code: error.code || "analysis_request_failed", message };
+      try {
+        await persistLocalState(attempt, job, "failed");
+        await state.browserStore.saveJob(job);
+        await state.browserStore.saveAttempt(attempt);
+      } catch (persistenceError) {
+        throw new Error(`Analysis failed and its local failure state could not be saved: ${persistenceError.message}`);
+      }
+      throw error;
+    }
+  }
+
+  async function displayLocalResult(attempt, job, recording) {
+    state.localPayload = job.result;
+    state.localAttempt = attempt;
+    state.localJob = job;
+    state.localRecording = recording;
+    state.localAnalysis = true;
+    const select = $("result-engine-select");
+    select.innerHTML = "";
+    for (const engineId of ENGINE_IDS) {
+      const analysis = job.result.analyses[engineId];
+      const label = engineId === "openpronounce" ? "OpenPronounce" : "Raw Wav2Vec2";
+      select.append(el("option", { value: engineId, text: `${label} — ${analysis.state}` }));
+    }
+    $("result-engine-label").hidden = false;
+    select.hidden = false;
+    select.onchange = () => displayLocalEngine(select.value);
+    select.value = ENGINE_IDS[0];
+    await displayLocalEngine(select.value);
+  }
+
+  async function displayLocalEngine(engineId) {
+    const analysis = state.localPayload.analyses[engineId];
+    const evidence = analysis.evidence;
+    const view = evidence
+      ? { ...evidence, source: "Browser-local recording" }
+      : {
+        state: analysis.state,
+        engine: analysis.result?.engine || { id: engineId },
+        target_text: state.localPayload.target_text,
+        words: [],
+        summary: {},
+        error: analysis.error || { message: "This engine could not complete the analysis." },
+      };
+    state.localAnalysis = true;
+    state.buffer = null;
+    try {
+      state.audioCtx = state.audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+      state.buffer = await state.audioCtx.decodeAudioData(await state.localRecording.arrayBuffer());
+      $("audio-info").textContent = "Playing the original browser recording; it is retained locally.";
+    } catch (error) {
+      state.buffer = null;
+      $("audio-info").textContent = "Playback is unavailable in this browser; the original recording remains saved locally.";
+    }
+    await showResult(view);
+    $("result-engine-label").hidden = false;
+    $("result-engine-select").hidden = false;
+  }
+
   async function analyse() {
     showError("");
     const text = $("target-text").value.trim();
@@ -623,7 +795,12 @@ if (typeof document !== "undefined" && document.getElementById("analyze-btn")) {
     if (!text) { showError("Enter the sentence you read aloud."); return; }
 
     let request;
+    let localInput = null;
     if (state.tab === "benchmark") {
+      state.localAnalysis = false;
+      $("result-engine-label").hidden = true;
+      $("result-engine-select").hidden = true;
+      $("local-analysis-timing").hidden = true;
       request = api("/api/analyze-benchmark", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ recording_id: $("benchmark-select").value, engine: engine, text: text }),
@@ -639,20 +816,42 @@ if (typeof document !== "undefined" && document.getElementById("analyze-btn")) {
         if (!f) { showError("Choose an audio file first."); return; }
         blob = f; name = f.name;
       }
-      request = api(analyzeUrl(text, engine), { method: "POST", headers: { "X-Filename": name }, body: blob });
+      localInput = { blob, name };
+    }
+    if (localInput && (!state.browserStore || !state.browserSession)) {
+      showError("Browser-local storage is not ready. Please wait and try again.");
+      return;
     }
 
     const btn = $("analyze-btn");
     btn.disabled = true;
+    if (localInput) {
+      state.localAnalysis = false;
+      state.localPayload = state.localAttempt = state.localJob = state.localRecording = null;
+      $("results-panel").hidden = true;
+      $("result-engine-label").hidden = true;
+      $("result-engine-select").hidden = true;
+      $("local-analysis-timing").hidden = true;
+    }
     $("run-status").textContent = "Analysing… (the first analysis also loads the model)";
     try {
-      const view = await request;
-      await showResult(view);
+      if (localInput) {
+        await analyzeLocally(text, localInput.blob, localInput.name);
+      } else {
+        await showResult(await request);
+      }
       $("run-status").textContent = "";
-      refreshHistory();
+      await refreshHistory();
     } catch (e) {
       $("run-status").textContent = "";
       showError(e.message);
+      if (localInput) {
+        try {
+          await refreshHistory();
+        } catch (historyError) {
+          showError(`${e.message} Local history could not be refreshed: ${historyError.message}`);
+        }
+      }
     } finally {
       btn.disabled = false;
     }
@@ -716,6 +915,9 @@ if (typeof document !== "undefined" && document.getElementById("analyze-btn")) {
       await loadAudio(view.audio.url);
       $("audio-info").textContent = "Playing the analysed audio (16 kHz mono, " + formatSeconds(view.audio.duration_ms) +
         (view.audio.conversion === "ffmpeg" ? ", converted from " + view.audio.original_name : "") + ").";
+    } else if (!state.localAnalysis) {
+      state.buffer = null;
+      $("audio-info").textContent = "";
     }
     for (const chip of summaryChips(view.summary || {})) {
       $("summary").append(el("span", { class: "chip cat-" + chip.category, text: chip.text }));
@@ -751,7 +953,7 @@ if (typeof document !== "undefined" && document.getElementById("analyze-btn")) {
   function noteCell(s, row) {
     const td = el("td", { class: "notes" });
     td.append(el("button", { type: "button", text: "▶ Play sound", onclick: () => play(s.play_ms, row) }));
-    if (!state.status.notes_enabled) return td;
+    if (state.localAnalysis || !state.status.notes_enabled) return td;
     const options = [
       ["as_expected", "I hear /" + s.expected + "/"],
       ["as_heard", s.heard && s.heard !== s.expected ? "I hear /" + s.heard + "/" : null],
@@ -928,11 +1130,16 @@ if (typeof document !== "undefined" && document.getElementById("analyze-btn")) {
 
     const other = red.engine.id === "openpronounce" ? "wav2vec2_raw" : "openpronounce";
     const cmpBox = el("div", { id: "reduction-compare" });
-    const cmpBtn = el("button", { type: "button", id: "compare-btn", text: "Compare with " + other, onclick: () => runCompare(cmpBox, cmpBtn) });
-    box.append(el("div", { class: "row" }, [
-      cmpBtn,
-      el("span", { class: "muted small", text: "Runs the other local engine on the same audio. Both share one acoustic model; differences are kept, not resolved." }),
-    ]), cmpBox);
+    if (state.localAnalysis) {
+      box.append(el("p", { class: "muted small", text:
+        "Both engines' evidence is saved separately in this browser. Use the engine selector above to view each result." }));
+    } else {
+      const cmpBtn = el("button", { type: "button", id: "compare-btn", text: "Compare with " + other, onclick: () => runCompare(cmpBox, cmpBtn) });
+      box.append(el("div", { class: "row" }, [
+        cmpBtn,
+        el("span", { class: "muted small", text: "Runs the other local engine on the same audio. Both share one acoustic model; differences are kept, not resolved." }),
+      ]), cmpBox);
+    }
 
     const byId = Object.fromEntries(red.candidates.map((c) => [c.id, c]));
     if (!red.groups.length) box.append(el("p", { text: "No reduction or connected-speech candidates in this recording's evidence." }));
@@ -965,15 +1172,38 @@ if (typeof document !== "undefined" && document.getElementById("analyze-btn")) {
 
   // --- history -----------------------------------------------------------------------
   async function refreshHistory() {
-    const res = await api("/api/analyses");
     const list = $("history-list");
     list.innerHTML = "";
-    if (!res.analyses.length) { list.append(el("li", { text: "No analyses yet." })); return; }
-    for (const a of res.analyses) {
+    const attempts = await state.browserStore.attempts(state.browserSession.id);
+    for (const attempt of attempts.slice().reverse()) {
+      const jobId = attempt.job_ids && attempt.job_ids[attempt.job_ids.length - 1];
+      const job = jobId ? await state.browserStore.loadJob(attempt.session_id, attempt.id, jobId) : null;
       list.append(el("li", {
-        text: localTime(a.created_at) + " · " + a.source + " · " + a.engine + " · “" + a.text + "”",
-        onclick: async () => { showError(""); try { await showResult(await api("/api/analyses/" + a.analysis_id)); } catch (e) { showError(e.message); } },
+        "data-local-attempt": attempt.id,
+        text: `${localTime(attempt.created_at)} · Browser-local · ${attempt.state}` +
+          ` · “${attempt.target_text}”`,
+        onclick: async () => {
+          showError("");
+          try {
+            const recording = await state.browserStore.loadRecording(attempt.session_id, attempt.id);
+            if (!job || !job.result || !recording) {
+              throw new Error((job && job.error && job.error.message) ||
+                "This local analysis is incomplete; its browser recording is still available.");
+            }
+            await displayLocalResult(attempt, job, recording.blob);
+            $("local-analysis-timing").hidden = false;
+            $("local-analysis-timing").textContent = `Browser request: ${job.timings.request_ms === null
+              ? "unavailable" : Math.round(job.timings.request_ms) + " ms"} · local persistence: ` +
+              `${Math.round(job.timings.persistence_ms)} ms`;
+          } catch (error) {
+            showError(error.message);
+          }
+        },
       }));
+    }
+    if (!attempts.length) {
+      list.append(el("li", { text: "No browser-local analyses yet." }));
+      return;
     }
   }
 
@@ -988,5 +1218,8 @@ if (typeof document !== "undefined" && document.getElementById("analyze-btn")) {
   $("coach-btn").addEventListener("click", showCoach);
   $("reduction-btn").addEventListener("click", showReduction);
   $("record-support").textContent = window.MediaRecorder ? "Recording uses your browser's microphone." : "This browser cannot record; use Upload.";
-  loadStatus().then(refreshHistory).catch((e) => showError("Could not reach the app: " + e.message));
+  loadStatus().then(async () => {
+    await initializeBrowserStore();
+    await refreshHistory();
+  }).catch((e) => showError("Could not initialize browser-owned analysis: " + e.message));
 }

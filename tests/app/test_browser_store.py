@@ -29,4 +29,4 @@ def test_browser_store_uses_native_indexeddb_and_isolates_databases():
         timeout=45,
     )
     assert result.returncode == 0, result.stderr + result.stdout
-    assert "ok BrowserStore native IndexedDB round-trip and isolation" in result.stdout
+    assert "ok BrowserStore native IndexedDB recording/result round-trip and isolation" in result.stdout

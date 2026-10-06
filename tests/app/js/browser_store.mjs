@@ -90,7 +90,7 @@ try {
     throw new Error(evaluated.exceptionDetails.exception?.description || evaluated.exceptionDetails.text);
   }
   if (evaluated.result.value.status !== "ok") throw new Error(evaluated.result.value.message);
-  console.log("ok BrowserStore native IndexedDB round-trip and isolation");
+  console.log("ok BrowserStore native IndexedDB recording/result round-trip and isolation");
 } finally {
   page?.close();
   browser?.close();

@@ -45,7 +45,7 @@
     <h2>2. What did you read?</h2>
     <textarea id="target-text" rows="2" maxlength="300" placeholder="Type the exact sentence you said, e.g. Think about the three things that you want to change."></textarea>
     <div class="row">
-      <label for="engine-select">Analysis engine</label>
+      <label for="engine-select">Benchmark engine</label>
       <select id="engine-select"></select>
     </div>
     <p id="engine-note" class="muted small"></p>
@@ -61,6 +61,9 @@
   <!-- 4. Results ---------------------------------------------------------- -->
   <section id="results-panel" class="panel" hidden>
     <h2>Result <span id="result-source" class="muted small"></span></h2>
+    <label id="result-engine-label" for="result-engine-select" hidden>Engine evidence</label>
+    <select id="result-engine-select" hidden></select>
+    <p id="local-analysis-timing" class="muted small" hidden></p>
     <div id="result-message" class="notice" hidden></div>
     <details id="caveats"><summary>How to read this</summary><ul id="caveat-list"></ul></details>
     <div id="summary" class="summary"></div>
@@ -91,6 +94,7 @@
 </main>
 
 <footer class="muted small" id="engines-footer"></footer>
+<script src="/static/browser-store.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>
