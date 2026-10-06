@@ -253,6 +253,69 @@ class AnalysisService:
         eid, engine = self._engine(engine_id)
         return self._run(data, filename, text, eid, engine, source_label=f"upload: {Path(filename or 'upload').name}")
 
+    def analyze_stateless(self, data: bytes, filename: str, text: str | None) -> dict[str, Any]:
+        """Analyze one upload with both local engines without retaining request data."""
+        text = validate_text(text)
+        request_id = uuid.uuid4().hex
+        analyses: dict[str, Any] = {}
+
+        with tempfile.TemporaryDirectory(prefix="pronunciation-lab-request-") as temporary:
+            try:
+                audio = prepare_audio(data, filename, Path(temporary))
+            except AudioInputError as exc:
+                status = 413 if exc.code == "audio_too_large" else 400
+                raise UserError(exc.code, exc.message, status) from exc
+
+            for engine_id in ("openpronounce", "wav2vec2_raw"):
+                engine = self._instances.get(engine_id)
+                if engine is None:
+                    analyses[engine_id] = {
+                        "state": "unavailable",
+                        "error": {
+                            "code": "engine_unavailable",
+                            "message": "This analysis engine is not available.",
+                        },
+                    }
+                    continue
+
+                try:
+                    result, evidence = analyze_pipeline(
+                        engine,
+                        audio.analysis_path,
+                        text,
+                        recording_id=f"request-{request_id[:8]}-{engine_id}",
+                        lock=self._lock,
+                        original_path=audio.original_path,
+                    )
+                    result_data = result.model_dump(mode="json")
+                    result_data["recording"]["audio"].pop("original_path", None)
+                    result_data["recording"]["audio"].pop("analysis_path", None)
+                    if result.status in ("failed", "blocked"):
+                        for error in result_data.get("errors", []):
+                            error["message"] = "The engine could not complete this analysis."
+                        if evidence.get("error"):
+                            evidence["error"]["detail"] = "The engine could not complete this analysis."
+                    analyses[engine_id] = {
+                        "state": result.status,
+                        "result": result_data,
+                        "evidence": evidence,
+                    }
+                except Exception:  # noqa: BLE001 - each engine is an independent analysis
+                    analyses[engine_id] = {
+                        "state": "failed",
+                        "error": {
+                            "code": "analysis_failed",
+                            "message": "This engine could not complete the analysis.",
+                        },
+                    }
+
+            return {
+                "request_id": request_id,
+                "target_text": text,
+                "duration_ms": audio.duration_ms,
+                "analyses": analyses,
+            }
+
     def analyze_benchmark(self, recording_id: str, engine_id: str | None, text: str | None = None) -> Analysis:
         match = next((r for r in self.benchmark_recordings() if r["id"] == recording_id), None)
         if match is None:
@@ -422,4 +485,3 @@ class AnalysisService:
         self._analyses.clear()
         if self._own_workspace:
             shutil.rmtree(self.workspace, ignore_errors=True)
-

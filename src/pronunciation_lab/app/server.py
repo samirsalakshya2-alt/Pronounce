@@ -7,6 +7,7 @@ Binds to 127.0.0.1 by default. Endpoints:
     GET  /api/status                     engines, ffmpeg, local benchmark recordings
     GET  /api/analyses                   analyses in this session (newest first)
     POST /api/analyze?text=..&engine=..  body: raw audio bytes; X-Filename header
+    POST /api/stateless/analyze          multipart {target_text, audio}; no retained analysis
     POST /api/analyze-benchmark          JSON {recording_id, engine, text?}
     GET  /api/analyses/<id>              the analysis view
     GET  /api/analyses/<id>/audio        the analysis WAV (the timeline of all timings)
@@ -25,6 +26,8 @@ import json
 import mimetypes
 import re
 import threading
+from email.parser import BytesParser
+from email.policy import default as email_policy
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -41,7 +44,60 @@ STATIC_FILES = {"index.html", "app.js", "style.css",
                 # M13 browser-local structured persistence
                 "browser-store.js"}
 MAX_JSON_BYTES = 64 * 1024
+MAX_MULTIPART_OVERHEAD_BYTES = 64 * 1024
 _ANALYSIS_RE = re.compile(r"^/api/analyses/([^/]+)(/audio|/notes)?$")
+
+
+def _stateless_upload(content_type: str, body: bytes) -> tuple[str, bytes, str]:
+    """Decode the exact multipart fields accepted by the stateless analysis endpoint."""
+    try:
+        content_type_header = content_type.encode("ascii")
+    except UnicodeEncodeError:
+        raise UserError("bad_multipart", "The multipart form is malformed.") from None
+    header = (
+        b"Content-Type: " + content_type_header + b"\r\n"
+        b"MIME-Version: 1.0\r\n"
+        b"\r\n"
+    )
+    message = BytesParser(policy=email_policy).parsebytes(header + body)
+    if message.get_content_type() != "multipart/form-data" or not message.get_boundary():
+        raise UserError("bad_multipart", "Send multipart form data with an audio file and target_text.")
+
+    parts: dict[str, tuple[Any, bytes]] = {}
+    try:
+        for part in message.iter_parts():
+            if part.get_content_disposition() != "form-data":
+                raise UserError("bad_multipart", "The multipart form contains an invalid field.")
+            name = part.get_param("name", header="content-disposition")
+            if name not in ("audio", "target_text") or name in parts:
+                raise UserError("bad_multipart", "The multipart form contains an invalid or duplicate field.")
+            payload = part.get_payload(decode=True)
+            if not isinstance(payload, bytes):
+                raise UserError("bad_multipart", "The multipart form contains an invalid field.")
+            parts[name] = (part, payload)
+    except (AttributeError, TypeError, ValueError):
+        raise UserError("bad_multipart", "The multipart form is malformed.") from None
+    if not parts:
+        raise UserError("bad_multipart", "Send multipart form data with an audio file and target_text.")
+
+    if "target_text" not in parts:
+        raise UserError("text_empty", "Enter the sentence you read aloud.")
+    if "audio" not in parts:
+        raise UserError("audio_empty", "No audio was received.")
+
+    target_part, target_bytes = parts["target_text"]
+    charset = target_part.get_content_charset()
+    if charset and charset.lower().replace("_", "-") not in ("utf-8", "utf8"):
+        raise UserError("bad_multipart", "The target_text field must be UTF-8 text.")
+    try:
+        target_text = target_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        raise UserError("bad_multipart", "The target_text field must be UTF-8 text.") from None
+
+    audio_part, audio = parts["audio"]
+    filename = audio_part.get_filename() or "upload.bin"
+    filename = filename.replace("\\", "/").rsplit("/", 1)[-1] or "upload.bin"
+    return target_text, audio, filename
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -165,6 +221,17 @@ class Handler(BaseHTTPRequestHandler):
         url = urlparse(self.path)
         service = self.server.service
         query = parse_qs(url.query)
+
+        if url.path == "/api/stateless/analyze":
+            content_type = self.headers.get("Content-Type", "")
+            if not content_type.lower().startswith("multipart/form-data"):
+                raise UserError("unsupported_media_type", "Use multipart/form-data for this request.", 415)
+            body = self._body(MAX_UPLOAD_BYTES + MAX_MULTIPART_OVERHEAD_BYTES)
+            text, audio, filename = _stateless_upload(content_type, body)
+            if len(audio) > MAX_UPLOAD_BYTES:
+                size_mb = MAX_UPLOAD_BYTES // (1024 * 1024) or 1
+                raise UserError("payload_too_large", f"The audio file is larger than {size_mb} MB.", 413)
+            return self._json(200, service.analyze_stateless(audio, filename, text))
 
         if url.path == "/api/analyze":
             data = self._body(MAX_UPLOAD_BYTES)
