@@ -15,6 +15,13 @@ import pytest
 from apphelpers import PROJECT_ROOT
 
 
+def default_reader_snapshot() -> dict[str, int]:
+    """Every file of the default reader store (the user's own readings) with its modification time. The tests launch
+    the app with a temporary --reader-dir, so this must never change (on startup the reader re-saves attempts)."""
+    root = Path.home() / ".pronunciation_lab" / "reader"
+    return {str(p): p.stat().st_mtime_ns for p in root.rglob("*") if p.is_file()} if root.exists() else {}
+
+
 def free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -24,7 +31,7 @@ def free_port() -> int:
 def launch(port: int, data_dir: Path, *extra: str) -> subprocess.Popen:
     return subprocess.Popen(
         [sys.executable, str(PROJECT_ROOT / "scripts" / "run_app.py"), "--port", str(port),
-         "--no-browser", "--data-dir", str(data_dir), *extra],
+         "--no-browser", "--data-dir", str(data_dir), "--reader-dir", str(data_dir / "reader"), *extra],
         cwd=str(PROJECT_ROOT), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
         env={**os.environ, "PYTHONUNBUFFERED": "1"},
     )
@@ -62,6 +69,7 @@ def pl_workspaces() -> set[str]:
 @pytest.mark.parametrize("stop_signal", [signal.SIGINT, signal.SIGTERM])
 def test_start_use_and_stop(tmp_path, stop_signal):
     before = pl_workspaces()
+    store_before = default_reader_snapshot()
     port = free_port()
     proc = launch(port, tmp_path, "--no-warmup")
     try:
@@ -73,12 +81,15 @@ def test_start_use_and_stop(tmp_path, stop_signal):
             assert b"Pronunciation Lab" in r.read()
         created = pl_workspaces() - before
         assert len(created) == 1
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/sessions", timeout=5) as r:
+            assert json.loads(r.read())["sessions"] == []      # the temporary reader store, not the user's own
     finally:
         out = stop(proc, stop_signal)
     assert proc.returncode == 0, out
     assert f"Pronunciation Lab running at http://127.0.0.1:{port}/" in out
     assert "Stopped." in out
     assert pl_workspaces() - before == set()  # the session workspace was removed
+    assert default_reader_snapshot() == store_before          # the user's own readings were never opened
 
 
 def test_port_in_use_fails_cleanly(tmp_path):
@@ -129,7 +140,7 @@ def test_sigint_stops_the_app_even_if_inherited_as_ignored(tmp_path):
     port = free_port()
     proc = subprocess.Popen(
         [sys.executable, str(PROJECT_ROOT / "scripts" / "run_app.py"), "--port", str(port), "--no-browser",
-         "--no-warmup", "--data-dir", str(tmp_path)],
+         "--no-warmup", "--data-dir", str(tmp_path), "--reader-dir", str(tmp_path / "reader")],
         cwd=str(PROJECT_ROOT), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
         env={**os.environ, "PYTHONUNBUFFERED": "1"},
         preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_IGN),

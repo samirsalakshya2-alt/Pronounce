@@ -11,6 +11,8 @@ Layout under `root` (default ~/.pronunciation_lab/reader, outside the repository
     sessions/{session_id}/attempts/{attempt_id}/jobs/{job_id}/result.json    write-once
     sessions/{session_id}/attempts/{attempt_id}/jobs/{job_id}/view.json      rebuildable from result.json
     sessions/{session_id}/summary.json
+    sessions/{session_id}/coaching.json         M9 advice issued with the summary (atomic rewrite)
+    sessions/{session_id}/reading_feedback.json M9 "This reading" (descriptive, this session only; regenerable)
 
 Atomic writes: temp file + fsync + rename. Write-once files use a hard link
 from the temp file, which fails if the target exists, so audio and result.json
@@ -232,4 +234,20 @@ class ReaderStore:
 
     def load_summary(self, sid: str) -> dict[str, Any] | None:
         path = self.session_dir(sid) / "summary.json"
+        return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
+
+    # -- M9 coaching snapshot: the advice issued with this session's summary (what was shown, when) ------
+    def save_coaching(self, sid: str, coaching: dict[str, Any]) -> None:
+        atomic_write_bytes(self.session_dir(sid) / "coaching.json", _dump(coaching))
+
+    def load_coaching(self, sid: str) -> dict[str, Any] | None:
+        path = self.session_dir(sid) / "coaching.json"
+        return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
+
+    # -- M9 "This reading": descriptive feedback on this session's summarised sentences (regenerable) ------------
+    def save_reading_feedback(self, sid: str, feedback: dict[str, Any]) -> None:
+        atomic_write_bytes(self.session_dir(sid) / "reading_feedback.json", _dump(feedback))
+
+    def load_reading_feedback(self, sid: str) -> dict[str, Any] | None:
+        path = self.session_dir(sid) / "reading_feedback.json"
         return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
