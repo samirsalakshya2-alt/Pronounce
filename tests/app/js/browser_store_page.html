@@ -1,0 +1,88 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>BrowserStore IndexedDB test</title>
+<pre id="result">pending</pre>
+<script src="/browser-store.js"></script>
+<script>
+  (async () => {
+    const assert = (condition, message) => {
+      if (!condition) throw new Error(message);
+    };
+    const equal = (actual, expected, message) => {
+      assert(JSON.stringify(actual) === JSON.stringify(expected), message);
+    };
+    const suffix = crypto.randomUUID();
+    const firstName = `pronounce-test-${suffix}`;
+    const secondName = `pronounce-test-other-${suffix}`;
+    const first = await PronounceBrowserStore.BrowserStore.open(firstName);
+    const session = { id: "session-1", article_id: "article-1", state: "READING" };
+    const article = { id: "article-1", text: "Hello browser." };
+    const attempt = { id: "attempt-1", session_id: session.id, target_text: "Hello." };
+    const job = { id: "job-1", session_id: session.id, attempt_id: attempt.id, state: "SUCCEEDED" };
+    const view = { words: [{ word: "Hello", outcome: "clear" }] };
+
+    await first.saveArticle(article);
+    await first.createSession(session);
+    await first.saveAttempt(attempt);
+    await first.saveJob(job);
+    await first.saveView(job, view);
+    await first.saveSummary(session.id, { state: "SUMMARIZED" });
+    await first.saveCoaching(session.id, { actions: [{ id: "action-1" }] });
+    await first.saveReadingFeedback(session.id, { state: "available" });
+    await first.appendEvent(session.id, "session_created", { article_id: article.id });
+    assert((await first.attemptExists(session.id, attempt.id)), "attempt existence was not persisted");
+    first.close();
+
+    const reopened = await PronounceBrowserStore.BrowserStore.open(firstName);
+    equal(await reopened.sessionIds(), [session.id], "session ids did not survive reopening");
+    equal(await reopened.loadSession(session.id), session, "session did not round-trip");
+    equal(await reopened.loadArticle(article.id), article, "article did not round-trip");
+    let duplicateArticleRejected = false;
+    try {
+      await reopened.saveArticle({ ...article, text: "Replacement." });
+    } catch (error) {
+      duplicateArticleRejected = error.name === "DuplicateRecordError";
+    }
+    assert(duplicateArticleRejected, "article write-once behavior was not preserved");
+    equal(await reopened.loadAttempt(session.id, attempt.id), attempt, "attempt did not round-trip");
+    equal(await reopened.loadJob(session.id, attempt.id, job.id), job, "job did not round-trip");
+    equal(await reopened.loadView(job), view, "view did not round-trip");
+    equal(await reopened.loadSummary(session.id), { state: "SUMMARIZED" }, "summary did not round-trip");
+    equal(await reopened.loadCoaching(session.id), { actions: [{ id: "action-1" }] }, "coaching did not round-trip");
+    equal(await reopened.loadReadingFeedback(session.id), { state: "available" }, "reading feedback did not round-trip");
+    const [event] = await reopened.events(session.id);
+    assert(event.kind === "session_created" && event.article_id === article.id, "event did not round-trip");
+
+    const longitudinal = reopened.progressStore();
+    const practice = { id: "practice-1", created_at: "2026-01-01T00:00:00Z", practice_session_id: session.id };
+    const cache = {
+      extractor_version: "test-v1",
+      readings: { [`${session.id}:attempt-1`]: { fingerprint: "fingerprint-1", record: { eligible: true } } },
+    };
+    const ledger = [{ reading_id: `${session.id}:attempt-1`, mode: "incremental" }];
+    const transition = [{ pattern: "sub:ɛ>ɪ", to: "CONTINUE_CURRENT_TARGET" }];
+    await longitudinal.savePractice(practice);
+    await longitudinal.saveCache(cache);
+    await longitudinal.appendLedger(ledger);
+    await longitudinal.appendTransitions(transition);
+    equal(await longitudinal.practiceRecords(), [practice], "practice record did not round-trip");
+    equal(await longitudinal.loadCache(), cache, "longitudinal cache did not round-trip");
+    equal(await longitudinal.ledger(), ledger, "longitudinal ledger did not round-trip");
+    equal(await longitudinal.transitionsLog(), transition, "transitions did not round-trip");
+
+    const isolated = await PronounceBrowserStore.BrowserStore.open(secondName);
+    assert((await isolated.sessionIds()).length === 0, "separate database exposed another database's sessions");
+    assert(!(await isolated.attemptExists(session.id, attempt.id)), "separate database exposed another database's attempts");
+    assert((await isolated.progressStore().practiceRecords()).length === 0, "separate database exposed longitudinal data");
+    assert(typeof isolated.writeAudio === "undefined", "audio persistence was unexpectedly introduced");
+    assert(typeof isolated.write_audio === "undefined", "filesystem audio API was unexpectedly introduced");
+    assert(!Array.from(isolated.database.objectStoreNames).some((name) => /audio|blob|opfs/i.test(name)),
+      "audio or OPFS object store was unexpectedly introduced");
+
+    isolated.close();
+    reopened.close();
+    document.getElementById("result").textContent = JSON.stringify({ status: "ok" });
+  })().catch((error) => {
+    document.getElementById("result").textContent = JSON.stringify({ status: "error", message: String(error.stack || error) });
+  });
+</script>

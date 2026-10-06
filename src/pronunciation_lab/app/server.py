@@ -37,7 +37,9 @@ from pronunciation_lab.reader import http as reader_http
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 STATIC_FILES = {"index.html", "app.js", "style.css",
                 # M12 reader
-                "read.html", "reader.js", "reader.css", "reader-core.js", "reader-feedback.js", "capture-worklet.js"}
+                "read.html", "reader.js", "reader.css", "reader-core.js", "reader-feedback.js", "capture-worklet.js",
+                # M13 browser-local structured persistence
+                "browser-store.js"}
 MAX_JSON_BYTES = 64 * 1024
 _ANALYSIS_RE = re.compile(r"^/api/analyses/([^/]+)(/audio|/notes)?$")
 
@@ -226,4 +228,3 @@ def start_in_thread(service: AnalysisService, host: str = "127.0.0.1", port: int
     thread = threading.Thread(target=server.serve_forever, name="pronunciation-lab-server", daemon=True)
     thread.start()
     return server, thread
-

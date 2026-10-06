@@ -1,7 +1,8 @@
 """M13-A storage boundary: the replaceable persistence surface for reader + M10 state.
 
-No runtime behaviour. The local app uses `LocalFileStore` (`ReaderStore`). A later BrowserStore
-would satisfy the same protocols without changing M9/M10 algorithms.
+The local app uses `LocalFileStore` (`ReaderStore`). The browser-side IndexedDB `BrowserStore`
+is an asynchronous structured-data foundation, not yet a drop-in implementation of these
+synchronous Python protocols: audio, filesystem paths, and session locks remain local-only.
 """
 
 from __future__ import annotations
