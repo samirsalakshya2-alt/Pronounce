@@ -12,7 +12,6 @@ observation ids, playback windows), never copied.
 
 from __future__ import annotations
 
-import hashlib
 import re
 from typing import Any
 
@@ -38,24 +37,8 @@ def _stress(ctx: dict[str, Any]) -> str | None:
 
 
 def fingerprint(store, sid: str, aid: str, session: dict[str, Any], article: dict[str, Any] | None) -> str | None:
-    """Cheap change detector for one attempt: its attempt.json and primary job.json bytes, the view's size and
-    mtime, the session engine and the article source. Any change re-extracts the attempt."""
-    adir = store.attempt_dir(sid, aid)
-    try:
-        h = hashlib.sha1((adir / "attempt.json").read_bytes())
-    except FileNotFoundError:
-        return None
-    for jdir in sorted((adir / "jobs").glob("*")) if (adir / "jobs").is_dir() else []:
-        for name in ("job.json",):
-            p = jdir / name
-            if p.is_file():
-                h.update(p.read_bytes())
-        v = jdir / "view.json"
-        if v.is_file():
-            st = v.stat()
-            h.update(f"{st.st_size}:{st.st_mtime_ns}".encode())
-    h.update(f"{session.get('engine_default')}|{(article or {}).get('source')}|{EXTRACTOR_VERSION}".encode())
-    return h.hexdigest()
+    """Cheap change detector for one attempt (delegates to the store; hash is unchanged)."""
+    return store.attempt_fingerprint(sid, aid, session, article)
 
 
 def extract_attempt(store, session: dict[str, Any], aid: str, article: dict[str, Any] | None,

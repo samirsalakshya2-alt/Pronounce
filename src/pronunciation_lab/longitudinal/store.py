@@ -174,7 +174,7 @@ def update(store, *, engine: str | None = None, rebuild: bool = False,
            persist: bool = True) -> dict[str, Any]:
     """Collect (incrementally, or rebuilding), build the longitudinal result, and record what was ingested and
     published. `persist=False` reads only (no cache, ledger or log writes)."""
-    pstore = ProgressStore(store.root)
+    pstore = store.progress_store()
     records, cache, extracted = collect(store, pstore, rebuild=rebuild, cal=cal)
     practice = pstore.practice_records()
     advice = advice_history(store)

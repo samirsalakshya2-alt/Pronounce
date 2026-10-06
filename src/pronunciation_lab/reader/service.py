@@ -45,7 +45,8 @@ from pronunciation_lab.reader import model as M
 from pronunciation_lab.reader.feedback import compact_feedback
 from pronunciation_lab.reader.segmenter import segment
 from pronunciation_lab.reader.status import attempt_status
-from pronunciation_lab.reader.store import AlreadyExists, ReaderStore
+from pronunciation_lab.reader.persistence import UserStore
+from pronunciation_lab.reader.store import AlreadyExists
 from pronunciation_lab.coaching import run_coaching
 from pronunciation_lab.coaching.reading import READING_VERSION, build_reading_feedback
 from pronunciation_lab.reader.coaching_source import load_inputs, load_session_inputs
@@ -79,7 +80,7 @@ def _reading_unavailable(exc: Exception) -> dict[str, Any]:
 
 
 class ReaderService:
-    def __init__(self, store: ReaderStore, analysis: AnalysisService, *, start_worker: bool = True) -> None:
+    def __init__(self, store: UserStore, analysis: AnalysisService, *, start_worker: bool = True) -> None:
         self.store = store
         self.analysis = analysis
         self._coaching_lock = threading.Lock()
@@ -711,7 +712,7 @@ class ReaderService:
         article = self.store.load_article(session["article_id"])
         if article.get("source") != PRACTICE_SOURCE:
             raise UserError("practice_invalid", "This session was not started as practice.")
-        pstore = longitudinal.ProgressStore(self.store.root)
+        pstore = self.store.progress_store()
         existing = next((r for r in pstore.practice_records() if r["practice_session_id"] == sid), None)
         if existing:
             return existing   # one record per practice session (idempotent)

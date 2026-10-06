@@ -21,6 +21,7 @@ can never be overwritten.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import tempfile
@@ -28,6 +29,8 @@ import threading
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
+
+from pronunciation_lab.reader.persistence import LongitudinalStore
 
 from pronunciation_lab.reader.model import now, valid_id
 
@@ -251,3 +254,35 @@ class ReaderStore:
     def load_reading_feedback(self, sid: str) -> dict[str, Any] | None:
         path = self.session_dir(sid) / "reading_feedback.json"
         return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
+
+    def attempt_fingerprint(self, sid: str, aid: str, session: dict[str, Any],
+                            article: dict[str, Any] | None) -> str | None:
+        """Cheap change detector for one attempt: its attempt.json and job.json bytes, the view's size and
+        mtime, the session engine and the article source. Any change re-extracts the attempt.
+
+        Hash algorithm is identical to the pre-M13-A `longitudinal.source.fingerprint` implementation.
+        """
+        from pronunciation_lab.longitudinal.source import EXTRACTOR_VERSION
+        adir = self.attempt_dir(sid, aid)
+        try:
+            h = hashlib.sha1((adir / "attempt.json").read_bytes())
+        except FileNotFoundError:
+            return None
+        for jdir in sorted((adir / "jobs").glob("*")) if (adir / "jobs").is_dir() else []:
+            for name in ("job.json",):
+                p = jdir / name
+                if p.is_file():
+                    h.update(p.read_bytes())
+            v = jdir / "view.json"
+            if v.is_file():
+                st = v.stat()
+                h.update(f"{st.st_size}:{st.st_mtime_ns}".encode())
+        h.update(f"{session.get('engine_default')}|{(article or {}).get('source')}|{EXTRACTOR_VERSION}".encode())
+        return h.hexdigest()
+
+    def progress_store(self) -> LongitudinalStore:
+        from pronunciation_lab.longitudinal.store import ProgressStore
+        return ProgressStore(self.root)
+
+
+LocalFileStore = ReaderStore

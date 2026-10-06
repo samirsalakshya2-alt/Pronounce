@@ -16,7 +16,7 @@ from pathlib import Path
 from pronunciation_lab.app.server import LabServer
 from pronunciation_lab.app.service import AnalysisService
 from pronunciation_lab.reader.service import ReaderService
-from pronunciation_lab.reader.store import ReaderStore
+from pronunciation_lab.reader.store import LocalFileStore
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
@@ -39,7 +39,7 @@ def main(argv: list[str] | None = None) -> int:
 
     notes = args.notes_file or args.data_dir / "listening_notes" / "notes.jsonl"
     service = AnalysisService(data_dir=args.data_dir, notes_path=notes)
-    reader = ReaderService(ReaderStore(args.reader_dir), service)
+    reader = ReaderService(LocalFileStore(args.reader_dir), service)
     try:
         server = LabServer((args.host, args.port), service, verbose=args.verbose, reader=reader)
     except OSError as exc:
