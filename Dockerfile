@@ -11,7 +11,7 @@ ENV UV_COMPILE_BYTECODE=1 \
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends espeak-ng ffmpeg libgomp1 libportaudio2 libsndfile1 \
+    && apt-get install -y --no-install-recommends build-essential espeak-ng ffmpeg libgomp1 libportaudio2 libsndfile1 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml uv.lock ./
