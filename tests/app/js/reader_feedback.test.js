@@ -198,4 +198,43 @@ assert.equal(F.readingView({ state: "unavailable" }).state, "unavailable");
 assert.equal(F.readingView(null).state, "none");
 assert.equal(F.READING_SCOPE, "This reading only");
 assert.equal(F.COACHING_SCOPE, "Based on your recent readings");
+// M10: personal progress view — groups, evidence chains, controlled wording, never a score
+const pitem = (over) => Object.assign({ pattern: "sub:ɛ>ɪ", label: "/ɛ/ heard as /ɪ/", kind: "sub", state: "PERSONAL_RECURRING",
+  scope: "CONTEXT_SPECIFIC", text: "Recurring across 6 readings of 6 different texts, in 9 words — likely personal.",
+  totals: { clear: 10, ambiguous: 3, clear_sessions: 6, clear_articles: 6, words: 9, opportunities: 80 },
+  context: { concentrated: [{ label: "in syllables with main dictionary stress", inside: { clear: 8, opportunities: 20 }, outside: { clear: 2, opportunities: 60 } }],
+    note: "Stress is the pronunciation dictionary's, not measured from your voice." },
+  baseline: { clear: 6, opportunities: 30, rate: 0.2 }, later: { observed: 4, opportunities: 50, sessions: 3, expected: 10 },
+  transitions: [{ to: "PERSONAL_RECURRING", reason: "recurring across texts: the personal gates are met", time: "2026-11-01T00:03" }],
+  evidence_classes: { FRESH: { readings: 6 }, REPEAT: { readings: 2 }, RETEST: { readings: 0 }, PRACTICE: { readings: 3 } },
+  outcomes: [{ outcome: "NO_TRANSFER", reason: "x", unpractised: { clear: 4, opportunities: 20, expected: 4 }, reverse: { post_clear: 0 } }],
+  decision: { decision: "MOVE_TO_FRESH_WORDS", active: true, recommendation: "Practise /ɛ/ in new words, not only the practised sentences." },
+  examples: [ref("best")] }, over);
+const prog = { integrity: { ok: true }, depth: "6 readings of 6 different texts so far.", noise: { text: "When you re-read …" },
+  engine_note: "Histories are kept per engine and never pooled.", practice: [],
+  patterns: [pitem(), pitem({ pattern: "sub:s>z", state: "STABLE", decision: { decision: "RETIRE", active: false, recommendation: "Stop …" }, outcomes: [] }),
+    pitem({ pattern: "sub:f>p", state: "IMPROVING", decision: { decision: "REDUCE_PRIORITY", active: false, recommendation: "Lower …" }, outcomes: [] }),
+    pitem({ pattern: "sub:w>v", state: "EMERGING", scope: "INSUFFICIENT_HISTORY", decision: { decision: "INSUFFICIENT_HISTORY", active: false, recommendation: "Keep reading" }, outcomes: [] })] };
+const pv = F.progressView(prog, { actions: [{ prioritised: false }, { prioritised: true }] });
+assert.deepEqual(pv.groups.map((g) => g.id), ["practise", "less_often", "stable", "emerging"]);
+assert.deepEqual(pv.groups.map((g) => g.items.map((x) => x.pattern)), [["sub:ɛ>ɪ"], ["sub:f>p"], ["sub:s>z"], ["sub:w>v"]]);
+assert.equal(pv.groups[0].items[0].decisionLabel, "Move to new words");
+assert.equal(pv.groups[0].items[0].scopeLabel, "Likely personal · one context");
+assert.equal(pv.hidden, 1);
+const chain = pv.groups[0].items[0].chain;
+assert.ok(chain[0].startsWith("Pattern: 10 clear (plus 3 ambiguous, support only) in 6 readings of 6 texts, 9 words; 80 chances."));
+assert.ok(chain.some((l) => l.startsWith("Where: concentrated in syllables with main dictionary stress (8 in 20, vs 2 in 60 elsewhere).")));
+assert.ok(chain.includes("Before: 6 in 30 chances (about 1 in 5)."));
+assert.ok(chain.includes("Since then: 4 in 50 chances across 3 readings; your earlier rate predicts about 10."));
+assert.ok(chain.some((l) => l.startsWith("Not used as evidence of change: 2 repeat, 3 practice readings")));
+assert.ok(chain.some((l) => l.startsWith("Practice: In the practised material it occurred less often, but in new words it continued")));
+assert.equal(chain[chain.length - 1], "Next: Practise /ɛ/ in new words, not only the practised sentences.");
+for (const banned of ["score", "%", "rank", "streak", "mastered", "fixed", "caused", "confidence"]) {
+  assert.ok(!JSON.stringify(pv).toLowerCase().includes(banned), banned);
+}
+assert.equal(F.progressView({ integrity: { ok: false } }).state, "unavailable");
+assert.equal(F.progressView(Object.assign({}, prog, { patterns: [] })).state, "none");
+assert.equal(F.outcomeText({ outcome: "TRANSFER", unpractised: { clear: 0, opportunities: 24, expected: 4.8 } }),
+  "Improvement was observed after practice: 0 in 24 chances in new words, where your earlier rate predicts about 4.8.");
+assert.equal(F.PROGRESS_SCOPE, "Based on all your readings");
 console.log("ok reader-feedback tests");

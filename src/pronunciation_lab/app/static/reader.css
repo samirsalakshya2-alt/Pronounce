@@ -223,3 +223,17 @@ button.stop { color: var(--rec); border-color: color-mix(in srgb, var(--rec) 40%
 .this-reading .reading-sub[data-sub="strengths"] h4, .this-reading .reading-sub[data-sub="fluency"] h4,
 .this-reading .reading-sub[data-sub="cautions"] h4 { font-weight: 500; color: var(--muted, #666); }
 .summary-group .scope, .practice-now .scope { margin: -4px 0 8px; }
+
+/* M10: personal progress — groups of patterns with their evidence chains; no scores */
+.patterns-over-time .progress-group h3 { font-size: 1em; margin: 14px 0 4px; }
+.patterns-over-time .progress-items { list-style: none; padding: 0; margin: 0; }
+.patterns-over-time .progress-item { margin: 10px 0; line-height: 1.5; }
+.patterns-over-time .progress-item p { margin: 2px 0; }
+.patterns-over-time .progress-decision { font-weight: 600; }
+.patterns-over-time .progress-chain ul { margin: 4px 0 4px 18px; padding: 0; }
+.patterns-over-time .progress-depth { margin: 4px 0 8px; }
+.practice-now .coach-history { margin: 4px 0; }
+.practice-now .coach-deprioritised { opacity: 0.75; }
+.patterns-over-time .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.patterns-over-time .chip { padding: 1px 8px; border-radius: 999px; font-size: .78rem; border: 1px solid currentColor; }
+.patterns-over-time .progress-decision { border-style: dashed; }

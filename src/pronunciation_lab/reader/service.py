@@ -46,6 +46,13 @@ from pronunciation_lab.reader.feedback import compact_feedback
 from pronunciation_lab.reader.segmenter import segment
 from pronunciation_lab.reader.status import attempt_status
 from pronunciation_lab.reader.store import AlreadyExists, ReaderStore
+from pronunciation_lab.coaching import run_coaching
+from pronunciation_lab.coaching.reading import READING_VERSION, build_reading_feedback
+from pronunciation_lab.reader.coaching_source import load_inputs, load_session_inputs
+from pronunciation_lab.longitudinal import store as longitudinal
+from pronunciation_lab.longitudinal.practice import new_record as new_practice_record
+from pronunciation_lab.longitudinal.progress import adapt_coaching
+from pronunciation_lab.longitudinal.source import PRACTICE_SOURCE
 from pronunciation_lab.reader.summary import build_summary, validate_summary
 from pronunciation_lab.reader.target import combine_engines, confirm_target, neighbours
 
@@ -65,10 +72,19 @@ def parse_client_wav(data: bytes) -> dict[str, int]:
     return info
 
 
+def _reading_unavailable(exc: Exception) -> dict[str, Any]:
+    return {"scope": "this_reading", "version": READING_VERSION, "state": "unavailable", "improvement_areas": [],
+            "no_area_text": None, "strengths": [], "fluency": None, "fluency_note": None, "cautions": [],
+            "error": f"{type(exc).__name__}: {exc}"}
+
+
 class ReaderService:
     def __init__(self, store: ReaderStore, analysis: AnalysisService, *, start_worker: bool = True) -> None:
         self.store = store
         self.analysis = analysis
+        self._coaching_lock = threading.Lock()
+        self._coaching_cache: tuple[Any, dict[str, Any]] | None = None
+        self._progress_lock = threading.Lock()
         self.worker = AnalysisWorker(self)
         self.recovered = self.recover()
         if start_worker:
@@ -185,6 +201,8 @@ class ReaderService:
                                for seg in article["segments"]},
             "queue": self.worker.queue_status(),
             "summary": self.summary(sid),
+            "coaching": self.store.load_coaching(sid),   # M9 advice issued with the summary (a snapshot)
+            "reading_feedback": self._current_reading_feedback(sid),   # M9 "This reading" (this session only)
         }
 
     def session_action(self, sid: str, action: Any, run_id: Any = None) -> dict[str, Any]:
@@ -623,10 +641,125 @@ class ReaderService:
             issues = validate_summary(summary, self.store)
             summary["integrity"] = {"ok": not issues, "issues": issues}
             self.store.save_summary(sid, summary)
+            # M9 "This reading": a description of this session's summarised sentences only (never the pool)
+            try:
+                reading = self._build_reading_feedback(sid, summary, article)
+            except Exception as exc:  # noqa: BLE001 - the description must never break the summary
+                reading = _reading_unavailable(exc)
+            self.store.save_reading_feedback(sid, reading)
+            # M9: the practice advice shown with this summary is stored as issued, so reopening never changes it
+            try:
+                coaching = self.coaching(detail=False)
+            except Exception as exc:  # noqa: BLE001 - coaching must never break the summary
+                coaching = {"version": None, "state": "unavailable", "actions": [], "no_action": None,
+                            "error": f"{type(exc).__name__}: {exc}"}
+            self.store.save_coaching(sid, coaching)
+            # M10: fold the new reading into the longitudinal state (incremental; never breaks the summary)
+            try:
+                self.progress()
+            except Exception:  # noqa: BLE001 - the longitudinal layer is optional for a summary
+                pass
             self._set_session_state(session, "SUMMARIZED")
             self.store.append_event(sid, "summary_built", inputs=len(summary["inputs"]), version=summary["version"])
             self._touch(session)
             return summary
+
+    def coaching(self, detail: bool = False) -> dict[str, Any]:
+        """M9: what to practise now, from recent eligible readings across sessions. Computed on demand from
+        stored evidence (no inference); cached while the eligible evidence is unchanged."""
+        inputs, exclusions = load_inputs(self.store)
+        key = (tuple((i.reading.reading_id, i.reading.job_id, i.coach_version, len(i.coach_observations),
+                      (i.fluency or {}).get("version")) for i in inputs), tuple(sorted(exclusions.items())))
+        with self._coaching_lock:
+            if self._coaching_cache is not None and self._coaching_cache[0] == key:
+                result = self._coaching_cache[1]
+            else:
+                result = run_coaching(inputs, prior_exclusions=exclusions, generated_at=M.now())
+                self._coaching_cache = (key, result)
+        return result if detail else {k: v for k, v in result.items() if k != "detail"}
+
+    # ------------------------------------------------------------------
+    # M10: personal progress (a longitudinal layer above stored results; no inference)
+    # ------------------------------------------------------------------
+
+    def progress(self, engine: str | None = None, rebuild: bool = False) -> dict[str, Any]:
+        """The longitudinal result for one engine (default: the engine of the most recent reading). Incremental:
+        only new or changed attempts are re-extracted; `rebuild` re-extracts everything from stored results."""
+        with self._progress_lock:
+            return longitudinal.update(self.store, engine=engine, rebuild=rebuild, generated_at=M.now())
+
+    def progress_view(self, engine: str | None = None, detail: bool = False, rebuild: bool = False) -> dict[str, Any]:
+        result = self.progress(engine, rebuild)
+        try:
+            coaching = self.coaching(detail=False)
+        except Exception:  # noqa: BLE001 - the history is useful without the advice
+            coaching = None
+        view = dict(result)
+        if not detail:   # the patterns worth showing; every count stays traceable through ?detail=1
+            view["patterns"] = [{k: v for k, v in it.items() if k != "clear_observations"} for it in result["patterns"]
+                                if it["state"] != "INSUFFICIENT_HISTORY" or it["scope"] != "INSUFFICIENT_HISTORY"
+                                or it["practice"]]
+            view["advice_history"] = None
+        return {"progress": view, "coaching_adaptation": adapt_coaching(coaching, result)}
+
+    def record_practice(self, body: dict[str, Any]) -> dict[str, Any]:
+        """An explicit practice start ("Read these now"): written once, linked to the M9 action it came from."""
+        sid, target_id = body.get("session_id"), body.get("target_id")
+        session = self._session(sid) if isinstance(sid, str) else None
+        if session is None or not isinstance(target_id, str):
+            raise UserError("practice_invalid", "A practice needs its session and the advice it came from.")
+        article = self.store.load_article(session["article_id"])
+        if article.get("source") != PRACTICE_SOURCE:
+            raise UserError("practice_invalid", "This session was not started as practice.")
+        pstore = longitudinal.ProgressStore(self.store.root)
+        existing = next((r for r in pstore.practice_records() if r["practice_session_id"] == sid), None)
+        if existing:
+            return existing   # one record per practice session (idempotent)
+        found = None
+        live = self.coaching(detail=False)
+        candidates = [live] + [c for s in reversed(self.store.session_ids()) if (c := self.store.load_coaching(s))]
+        for c in candidates:
+            for a in c.get("actions") or []:
+                if (a.get("target") or {}).get("target_id") == target_id:
+                    found = (a, c)
+                    break
+            if found:
+                break
+        if found is None:
+            raise UserError("practice_target_unknown", "That advice is no longer available.", 404)
+        action, coaching = found
+        record = new_practice_record(M.new_id(), M.now(), sid, article, action,
+                                     {"generated_at": coaching.get("generated_at"),
+                                      "fingerprint": (coaching.get("pool") or {}).get("fingerprint")})
+        pstore.save_practice(record)
+        return record
+
+    def _build_reading_feedback(self, sid: str, summary: dict[str, Any], article: dict[str, Any]) -> dict[str, Any]:
+        inputs, _ = load_session_inputs(self.store, sid, [i["attempt_id"] for i in summary["inputs"]])
+        return build_reading_feedback(inputs, session_id=sid, article_title=article.get("title"),
+                                      coverage=summary["coverage"], generated_at=M.now())
+
+    def reading_feedback(self, sid: str) -> dict[str, Any] | None:
+        """M9 "This reading" for one session: the stored description, or rebuilt from its summary's inputs."""
+        self._session(sid)
+        return self._current_reading_feedback(sid)
+
+    def _current_reading_feedback(self, sid: str) -> dict[str, Any] | None:
+        """The stored description when it is the current version; otherwise rebuilt from the summary's inputs
+        (regenerable from write-once results, unlike the issued coaching.json, which is never rebuilt)."""
+        stored = self.store.load_reading_feedback(sid)
+        if stored is not None and stored.get("version") == READING_VERSION:
+            return stored
+        summary = self.store.load_summary(sid)
+        if summary is None:
+            return stored
+        try:
+            article = self.store.load_article(self.store.load_session(sid)["article_id"])
+            feedback = self._build_reading_feedback(sid, summary, article)
+        except Exception as exc:  # noqa: BLE001 - the description must never break the session view
+            feedback = _reading_unavailable(exc)
+        self.store.save_reading_feedback(sid, feedback)
+        return feedback
 
     def summary(self, sid: str) -> dict[str, Any] | None:
         session = self._session(sid)

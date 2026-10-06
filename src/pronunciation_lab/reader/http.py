@@ -14,6 +14,10 @@
     GET  /api/sessions/<sid>/attempts/<aid>/comparison        both engines' evidence, paired (never merged)
     POST /api/sessions/<sid>/attempts/<aid>/jobs/<jid>/retry  retry a failed analysis
     GET  /api/sessions/<sid>/summary                          the single-session reading summary
+    GET  /api/coaching[?detail=1]                             M9: what to practise now (0–3 actions), across sessions
+    GET  /api/sessions/<sid>/reading-feedback                 M9: "This reading" (this session only, descriptive)
+    GET  /api/progress[?engine=&detail=1&rebuild=1]           M10: personal progress (longitudinal; no inference)
+    POST /api/practice                                        M10: {session_id, target_id} — an explicit practice start
 """
 
 from __future__ import annotations
@@ -29,6 +33,7 @@ _ID = r"([0-9a-f]{32})"
 _SESSION = re.compile(rf"/api/sessions/{_ID}")
 _SESSION_STATE = re.compile(rf"/api/sessions/{_ID}/state")
 _SUMMARY = re.compile(rf"/api/sessions/{_ID}/summary")
+_READING = re.compile(rf"/api/sessions/{_ID}/reading-feedback")
 _ATTEMPT = re.compile(rf"/api/sessions/{_ID}/attempts/{_ID}(/start|/audio|/disposition|/compare|/comparison)?")
 _RETRY = re.compile(rf"/api/sessions/{_ID}/attempts/{_ID}/jobs/{_ID}/retry")
 
@@ -41,6 +46,15 @@ def _reader(handler):
 
 
 def handle_get(handler, path: str, query: dict[str, list[str]]) -> bool:
+    if path == "/api/coaching":
+        detail = (query.get("detail") or ["0"])[0] in ("1", "true", "full")
+        handler._json(200, {"coaching": _reader(handler).coaching(detail)})
+        return True
+    if path == "/api/progress":
+        flag = lambda k: (query.get(k) or ["0"])[0] in ("1", "true", "full")  # noqa: E731
+        engine = (query.get("engine") or [None])[0]
+        handler._json(200, _reader(handler).progress_view(engine, flag("detail"), flag("rebuild")))
+        return True
     if not path.startswith("/api/sessions"):
         return False
     reader = _reader(handler)
@@ -54,6 +68,9 @@ def handle_get(handler, path: str, query: dict[str, list[str]]) -> bool:
         return True
     if m := _SUMMARY.fullmatch(path):
         handler._json(200, {"summary": reader.summary(m.group(1))})
+        return True
+    if m := _READING.fullmatch(path):
+        handler._json(200, {"reading_feedback": reader.reading_feedback(m.group(1))})
         return True
     if m := _ATTEMPT.fullmatch(path):
         sid, aid, tail = m.groups()
@@ -71,6 +88,9 @@ def handle_get(handler, path: str, query: dict[str, list[str]]) -> bool:
 
 
 def handle_post(handler, path: str) -> bool:
+    if path == "/api/practice":
+        handler._json(200, {"practice": _reader(handler).record_practice(handler._json_body())})
+        return True
     if path == "/api/articles":
         body = handler._json_body()
         handler._json(200, {"article": _reader(handler).create_article(body.get("text"), body.get("title"),

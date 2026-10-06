@@ -52,6 +52,20 @@
       sel.append(el("option", { value: e.id, text: e.label }));
     }
     sel.value = S.status.default_engine;
+    try {  // M9: what to practise now, across recent readings (0–3 actions, or why there are none)
+      const { coaching } = await api("/api/coaching");
+      $("practice-now").hidden = !coaching || coaching.state === "unavailable";
+      $("practice-now-body").innerHTML = "";
+      if (coaching && window.ReaderFeedback) window.ReaderFeedback.renderCoaching(S, $("practice-now-body"), coaching);
+    } catch (e) { $("practice-now").hidden = true; /* optional */ }
+    try {  // M10: personal progress across all readings (longitudinal; never a score)
+      const { progress, coaching_adaptation } = await api("/api/progress");
+      if (window.ReaderFeedback) {
+        window.ReaderFeedback.annotateCoaching($("practice-now-body"), coaching_adaptation);
+        const v = window.ReaderFeedback.renderProgress(S, $("patterns-over-time-body"), progress, coaching_adaptation);
+        $("patterns-over-time").hidden = !v || v.state === "unavailable";
+      }
+    } catch (e) { $("patterns-over-time").hidden = true; /* optional */ }
     try {
       const { sessions } = await api("/api/sessions");
       $("recent").hidden = !sessions.length;
@@ -387,6 +401,19 @@
   // --- actions used by the feedback drawer ----------------------------------------------------------
   window.__readerApi = {
     refresh() { renderSegments(); },
+    /** M9 retest: the action's sentences become a short practice article, read through the normal reader. */
+    async startPractice(sentences, title, targetId) {
+      try {
+        const engine = (S.snap && S.snap.session && S.snap.session.engine_default) || (S.status && S.status.default_engine);
+        const { article } = await post("/api/articles", { text: sentences.join("\n\n"),
+          title: ("Practice: " + (title || "")).slice(0, 200), source: "What to practise now" });
+        const sid = uuidHex();
+        await post("/api/sessions", { session_id: sid, article_id: article.id, engine });
+        // M10: an explicit practice record (what was practised, linked to its advice); never blocks reading
+        if (targetId) await post("/api/practice", { session_id: sid, target_id: targetId }).catch(() => null);
+        location.href = "/read?session=" + sid;
+      } catch (e) { notice(e.message); }
+    },
     readAgain(segId) { onSegment(segId); },
     retry(a, job) {
       post(`/api/sessions/${S.sessionId}/attempts/${a.id}/jobs/${job.id}/retry`, {})

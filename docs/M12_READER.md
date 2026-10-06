@@ -241,6 +241,8 @@ pattern was strong enough to call out in this reading."), *Already stable in thi
 *Cautions*), then **What to practise now** ("Based on your recent readings", unchanged), then the detailed
 report. See `docs/M9_PARETO_COACHING.md`.
 
+**Your patterns over time (M10).** On the entry page, below *What to practise now*: the longitudinal view of all readings (likely personal, occurring less often, stable for now, new), each with its evidence chain; "Read these now" writes an explicit practice record. See `docs/M10_LONGITUDINAL_IMPROVEMENT.md`.
+
 **What to practise now (M9).** In *Your reading*, the 0–3 practice actions issued when the summary
 was built (stored as `coaching.json`, so reopening never changes them). They replace the previous unbounded
 "Sounds worth practising" list in the UI. The summary data (`practise`, `patterns`, `reductions`, `fluency`)

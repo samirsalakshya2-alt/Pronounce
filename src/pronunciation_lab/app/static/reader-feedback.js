@@ -229,11 +229,82 @@ function actionEvidenceLines(a) {
   return lines;
 }
 
+// M10: personal progress — the longitudinal result as groups and evidence chains (built only from the M10 result).
+const DECISION_LABEL = { CONTINUE_CURRENT_TARGET: "Keep practising", MOVE_TO_FRESH_WORDS: "Move to new words",
+  MOVE_TO_NEW_CONTEXT: "Move to another context", CHANGE_PRACTICE_METHOD: "Change the method",
+  REDUCE_PRIORITY: "Lower priority", RETIRE: "Stop for now", WATCH_FOR_REGRESSION: "Watching silently",
+  INSUFFICIENT_HISTORY: "Watching", INCREASE_CONTEXT_DIFFICULTY: "Harder context" };
+const SCOPE_LABEL = { PERSONAL_RECURRING: "Likely personal", CONTEXT_SPECIFIC: "Likely personal · one context",
+  WORD_SPECIFIC: "One word", ARTICLE_BOUND: "One text so far", INSUFFICIENT_HISTORY: "" };
+const PROGRESS_SCOPE = "Based on all your readings";
+
+function aboutCount(x) { return x == null ? "?" : (x >= 10 ? String(Math.round(x)) : String(Math.round(x * 10) / 10)); }
+function oneIn(rate) { return rate ? `about 1 in ${Math.max(1, Math.round(1 / rate))}` : "none"; }
+
+function outcomeText(o) {
+  const u = o.unpractised;
+  const n = `${u.clear} in ${u.opportunities} chances in new words, where your earlier rate predicts about ${aboutCount(u.expected)}`;
+  switch (o.outcome) {
+    case "TRANSFER": return `Improvement was observed after practice: ${n}.`;
+    case "NO_TRANSFER": return `In the practised material it occurred less often, but in new words it continued: ${n}.`;
+    case "CONTINUING": return `Still occurring in new words after practice: ${n}.`;
+    case "REVERSE_DIRECTION":
+      return `Less often after practice, but the opposite direction rose (${(o.reverse || {}).post_clear} times): possible overcorrection.`;
+    default: return `Not enough new readings since this practice to tell (${o.reason}).`;
+  }
+}
+
+function patternChain(it) {
+  const t = it.totals;
+  const lines = [];
+  const chances = it.kind === "fluency" ? "measurable sentences" : "chances";
+  lines.push(`Pattern: ${t.clear} clear` + (t.ambiguous ? ` (plus ${t.ambiguous} ambiguous, support only)` : "") +
+    ` in ${t.clear_sessions} reading${t.clear_sessions === 1 ? "" : "s"} of ${t.clear_articles} text${t.clear_articles === 1 ? "" : "s"}` +
+    (it.kind === "fluency" ? "" : `, ${t.words} word${t.words === 1 ? "" : "s"}`) + `; ${t.opportunities} ${chances}.`);
+  if (it.scope === "CONTEXT_SPECIFIC" && it.context.concentrated.length) {
+    lines.push("Where: concentrated " + it.context.concentrated.map((c) =>
+      `${c.label} (${c.inside.clear} in ${c.inside.opportunities}, vs ${c.outside.clear} in ${c.outside.opportunities} elsewhere)`).join("; ") + "." +
+      (it.context.note ? " " + it.context.note : ""));
+  }
+  if (it.baseline) lines.push(`Before: ${it.baseline.clear} in ${it.baseline.opportunities} ${chances} (${oneIn(it.baseline.rate)}).`);
+  if (it.later && it.later.opportunities) {
+    lines.push(`Since then: ${it.later.observed} in ${it.later.opportunities} ${chances} across ${it.later.sessions} readings; ` +
+      `your earlier rate predicts about ${aboutCount(it.later.expected)}.`);
+  }
+  for (const tr of it.transitions) lines.push(`History: ${tr.to.toLowerCase().replace(/_/g, " ")} — ${tr.reason} (${(tr.time || "").slice(0, 10)}).`);
+  const ec = it.evidence_classes;
+  const other = ["REPEAT", "RETEST", "PRACTICE"].filter((c) => ec[c] && ec[c].readings).map((c) => `${ec[c].readings} ${c.toLowerCase()}`);
+  if (other.length) lines.push(`Not used as evidence of change: ${other.join(", ")} readings (re-reading a sentence is not independent evidence).`);
+  for (const o of it.outcomes) lines.push(`Practice: ${outcomeText(o)}`);
+  lines.push(`Next: ${it.decision.recommendation}`);
+  return lines;
+}
+
+function progressView(progress, adaptation) {
+  if (!progress || !progress.integrity || !progress.integrity.ok) return { state: "unavailable", groups: [] };
+  const items = (progress.patterns || []).map((it) => ({ pattern: it.pattern, label: it.label, state: it.state, scope: it.scope,
+    scopeLabel: SCOPE_LABEL[it.scope] || "", text: it.text, decision: it.decision.decision,
+    decisionLabel: DECISION_LABEL[it.decision.decision], recommendation: it.decision.recommendation,
+    active: it.decision.active, chain: patternChain(it), examples: (it.examples || []).slice(0, 3) }));
+  const pick = (f) => items.filter(f);
+  const groups = [
+    { id: "practise", title: "Keep working on", items: pick((x) => x.active) },
+    { id: "less_often", title: "Occurring less often", items: pick((x) => !x.active && (x.state === "IMPROVING" || x.decision === "REDUCE_PRIORITY")) },
+    { id: "stable", title: "Stable for now", items: pick((x) => x.state === "STABLE" || x.state === "RETIRED") },
+    { id: "emerging", title: "New — not enough history yet", items: pick((x) => !x.active && x.state === "EMERGING") },
+  ].filter((g) => g.items.length);
+  const practice = (progress.practice || []).map((p) => ({ title: p.record.advice.action_text, completion: p.status.completion,
+    read: `${p.status.sentences_read} of ${p.status.sentences} practice sentences read`,
+    outcomes: p.outcomes.map((o) => outcomeText(o)) }));
+  return { state: groups.length ? "patterns" : "none", depth: progress.depth, noise: progress.noise && progress.noise.text,
+    engineNote: progress.engine_note, groups, practice, hidden: (adaptation && adaptation.actions || []).filter((a) => !a.prioritised).length };
+}
+
 if (typeof module !== "undefined") {
   module.exports = { feedbackLine, displayAttempt, primaryJob, TARGET_TEXT, NOTE_IDENTITY, identityOf, sentencesText, boundaryNote, BOUNDARY_TEXT,
     otherBoundary, fluencyLine, rateText, fluencyItems, fluencyItemText, STRENGTH_TEXT, readingLines, spanText, listenTitle,
     boundaryPlainText, BOUNDARY_CONFIDENCE_TEXT, coachingView, actionEvidenceLines, COACHING_UNAVAILABLE,
-    readingView, READING_SCOPE, COACHING_SCOPE };
+    readingView, READING_SCOPE, COACHING_SCOPE, progressView, patternChain, outcomeText, PROGRESS_SCOPE, DECISION_LABEL };
 }
 
 // --- browser ----------------------------------------------------------------------------------------
@@ -808,7 +879,8 @@ if (typeof document !== "undefined") {
       const guidance = raw.practice.guidance;
       if (guidance.length) evidence.append(el("p", { class: "small muted", text: `${guidance.map((g) => g.text).join(" ")} (${raw.practice.guidance_note})` }));
       const readBtn = el("button", { type: "button", class: "coach-read", text: "Read these now",
-        onclick: () => window.__readerApi && window.__readerApi.startPractice(a.retest.map((r) => r.text), a.title) });
+        onclick: () => window.__readerApi && window.__readerApi.startPractice(a.retest.map((r) => r.text), a.title,
+          raw.target.target_id) });
       list.append(el("li", { class: "coach-action", "data-target": raw.target.target_id, "data-kind": raw.target.kind }, [
         el("div", { class: "row" }, [el("strong", { class: "coach-title", text: a.title }),
           el("span", { class: "muted small", text: `about ${a.minutes} min` })]),
@@ -821,6 +893,70 @@ if (typeof document !== "undefined") {
       ]));
     });
     box.append(list);
+    return v;
+  }
+
+  /** M10: M9's actions with their history; an action that is stable for now in the history is not a priority. */
+  function annotateCoaching(box, adaptation) {
+    const el = domEl;
+    if (!adaptation) return;
+    const lis = [...box.querySelectorAll("li.coach-action")];
+    const stable = [];
+    adaptation.actions.forEach((a) => {
+      const li = lis[a.index];
+      if (!li || !a.history.length) return;
+      li.insertBefore(el("p", { class: "small coach-history", text: "Your history: " + a.history.map((h) => h.text).join(" ") }),
+        li.querySelector(".coach-practise"));
+      if (!a.prioritised) { li.classList.add("coach-deprioritised"); stable.push(li); }
+    });
+    if (stable.length) {
+      const d = el("details", { class: "coach-stable" }, [el("summary", { text: `Stable for now in your history (${stable.length})` })]);
+      stable.forEach((li) => d.append(li));
+      box.append(d);
+    }
+  }
+
+  /** M10: "Your patterns over time" — groups of patterns, each with its evidence chain and exact playback. */
+  function renderProgress(S, box, progress, adaptation) {
+    const el = domEl;
+    const v = progressView(progress, adaptation);
+    box.innerHTML = "";
+    if (v.state === "unavailable") { box.append(el("p", { class: "muted", text: "Your history is not available right now." })); return v; }
+    if (v.depth) box.append(el("p", { class: "progress-depth", text: v.depth }));
+    if (v.state === "none") box.append(el("p", { class: "muted", text: "No pattern has enough history yet to say how it is changing." }));
+    for (const g of v.groups) {
+      const sec = el("div", { class: "progress-group", "data-group": g.id }, [el("h3", { text: g.title })]);
+      const ul = el("ul", { class: "progress-items" });
+      for (const it of g.items) {
+        const chain = el("details", { class: "progress-chain" }, [el("summary", { text: "How Pronounce knows this" })]);
+        const cl = el("ul", { class: "small" });
+        it.chain.forEach((line) => cl.append(el("li", { text: line })));
+        chain.append(cl);
+        if (it.examples.length) chain.append(el("p", { class: "small" }, ["Listen: ", ...it.examples.map((r) =>
+          el("button", { type: "button", class: "play-example progress-listen", text: `▶ ${r.word || "moment"}`,
+            onclick: (ev) => playRef(S, r, ev.target) }))]));
+        ul.append(el("li", { class: "progress-item", "data-pattern": it.pattern, "data-state": it.state, "data-decision": it.decision }, [
+          el("div", { class: "row" }, [el("strong", { class: "ipa", text: it.label }),
+            ...(it.scopeLabel ? [el("span", { class: "chip", text: it.scopeLabel })] : []),
+            el("span", { class: "chip progress-decision", text: it.decisionLabel })]),
+          el("p", { class: "progress-text", text: it.text }),
+          el("p", { class: "small progress-next", text: it.recommendation }),
+          chain]));
+      }
+      sec.append(ul);
+      box.append(sec);
+    }
+    if (v.practice.length) {
+      const pr = el("details", { class: "progress-practice" }, [el("summary", { text: `Your practice (${v.practice.length})` })]);
+      const ul = el("ul", { class: "small" });
+      v.practice.forEach((p) => ul.append(el("li", { text: `${p.title} — ${p.read}. ` + (p.outcomes.join(" ") || "") })));
+      pr.append(ul);
+      box.append(pr);
+    }
+    const how = el("details", { class: "progress-how" }, [el("summary", { text: "How to read this" })]);
+    [v.noise, v.engineNote, "Only the first reading of each sentence counts as evidence of change; re-reads, retests and practice are shown but never counted. Nothing here is a score."]
+      .filter(Boolean).forEach((t) => how.append(el("p", { class: "small muted", text: t })));
+    box.append(how);
     return v;
   }
 
@@ -969,5 +1105,6 @@ if (typeof document !== "undefined") {
   function updateAll(S, snap) { baseUpdate(S, snap); renderSummary(S, snap); }
 
   window.ReaderFeedback = { update: updateAll, renderNote, annotate, toggle, renderDrawer, renderSummary, closeWord, renderCoaching,
+    renderProgress, annotateCoaching,
     renderFluencyComparison };
 }

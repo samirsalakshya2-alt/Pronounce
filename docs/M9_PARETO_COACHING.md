@@ -514,6 +514,10 @@ M9 never compares windows, computes change, or words anything as progress; the v
 "progress" and "better than". The stored `coaching.json` per summary records what was advised when, for M10
 to evaluate.
 
+M10 (`docs/M10_LONGITUDINAL_IMPROVEMENT.md`) consumes these records without changing M9: it links every M9 target to
+stable directed-sound patterns, adds a history line to each live action, and shows an action whose patterns are all
+"stable for now" as not prioritised (presentation layer only; M9's qualification, ordering and outputs are unchanged).
+
 ## Known limitations
 
 * **No ground truth of usefulness:** whether practising a selected target helps is unmeasured (M10).
