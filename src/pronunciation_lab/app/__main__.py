@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import signal
 import sys
 import threading
@@ -24,7 +25,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="pronunciation-lab")
     parser.add_argument("--host", default="127.0.0.1", help="interface to bind (default: localhost only)")
-    parser.add_argument("--port", type=int, default=8642)
+    parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8642")))
     parser.add_argument("--data-dir", type=Path, default=PROJECT_ROOT / "data",
                         help="where the (optional) benchmark recordings and listening notes live")
     parser.add_argument("--notes-file", type=Path, default=None,
@@ -34,23 +35,37 @@ def main(argv: list[str] | None = None) -> int:
                              "(default: ~/.pronunciation_lab/reader, outside the repository)")
     parser.add_argument("--no-browser", action="store_true")
     parser.add_argument("--no-warmup", action="store_true", help="load the model on first analysis instead")
+    parser.add_argument("--stateless-only", action="store_true",
+                        help="serve the browser UI and stateless analysis endpoint only")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args(argv)
 
-    notes = args.notes_file or args.data_dir / "listening_notes" / "notes.jsonl"
-    service = AnalysisService(data_dir=args.data_dir, notes_path=notes)
-    reader = ReaderService(LocalFileStore(args.reader_dir), service)
+    if args.stateless_only:
+        service = AnalysisService()
+        reader = None
+    else:
+        notes = args.notes_file or args.data_dir / "listening_notes" / "notes.jsonl"
+        service = AnalysisService(data_dir=args.data_dir, notes_path=notes)
+        reader = ReaderService(LocalFileStore(args.reader_dir), service)
     try:
-        server = LabServer((args.host, args.port), service, verbose=args.verbose, reader=reader)
+        server = LabServer(
+            (args.host, args.port),
+            service,
+            verbose=args.verbose,
+            reader=reader,
+            stateless_only=args.stateless_only,
+        )
     except OSError as exc:
-        reader.close()
+        if reader is not None:
+            reader.close()
         service.close()
         print(f"Could not start on {args.host}:{args.port}: {exc}", file=sys.stderr)
         return 2
 
     usable = [e["label"] for e in service.engines.values() if e["state"] == "runnable"]
     print(f"Pronunciation Lab running at {server.url}", flush=True)
-    print(f"Reader: {server.url}read  (sessions in {reader.store.root})", flush=True)
+    if reader is not None:
+        print(f"Reader: {server.url}read  (sessions in {reader.store.root})", flush=True)
     print(f"Engines available: {', '.join(usable) or 'none'}", flush=True)
     print("Press Ctrl+C to stop.", flush=True)
 
@@ -73,7 +88,8 @@ def main(argv: list[str] | None = None) -> int:
         pass
     finally:
         server.server_close()
-        reader.close()
+        if reader is not None:
+            reader.close()
         service.close()
         print("Stopped.", flush=True)
     return 0

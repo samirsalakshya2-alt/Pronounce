@@ -4,6 +4,7 @@ Binds to 127.0.0.1 by default. Endpoints:
 
     GET  /                               the single-page UI
     GET  /static/<file>                  UI assets (fixed whitelist)
+    GET  /healthz                        process health check
     GET  /api/status                     engines, ffmpeg, local benchmark recordings
     GET  /api/analyses                   analyses in this session (newest first)
     POST /api/analyze?text=..&engine=..  body: raw audio bytes; X-Filename header
@@ -182,6 +183,12 @@ class Handler(BaseHTTPRequestHandler):
         service = self.server.service
         path = url.path
 
+        if path == "/healthz":
+            return self._json(200, {"status": "ok"})
+        if self.server.stateless_only and not (
+            path in ("/", "/index.html", "/api/status") or path.startswith("/static/")
+        ):
+            raise UserError("not_found", "Not found.", 404)
         if path in ("/", "/index.html"):
             return self._static("index.html")
         if path in ("/read", "/read/"):
@@ -209,6 +216,11 @@ class Handler(BaseHTTPRequestHandler):
         raise UserError("not_found", "Not found.", 404)
 
     def _static(self, name: str) -> None:
+        if self.server.stateless_only and name in {
+            "read.html", "reader.js", "reader.css", "reader-core.js",
+            "reader-feedback.js", "capture-worklet.js",
+    }:
+            raise UserError("not_found", "Not found.", 404)
         if name not in STATIC_FILES:
             raise UserError("not_found", "Not found.", 404)
         body = (STATIC_DIR / name).read_bytes()
@@ -221,6 +233,10 @@ class Handler(BaseHTTPRequestHandler):
         url = urlparse(self.path)
         service = self.server.service
         query = parse_qs(url.query)
+
+        if self.server.stateless_only and url.path != "/api/stateless/analyze":
+            self.close_connection = True
+            raise UserError("not_found", "Not found.", 404)
 
         if url.path == "/api/stateless/analyze":
             content_type = self.headers.get("Content-Type", "")
@@ -276,10 +292,11 @@ class LabServer(ThreadingHTTPServer):
     request_queue_size = 64
 
     def __init__(self, address: tuple[str, int], service: AnalysisService, *, verbose: bool = False,
-                 reader: Any = None) -> None:
+                 reader: Any = None, stateless_only: bool = False) -> None:
         super().__init__(address, Handler)
         self.service = service
         self.reader = reader  # M12 ReaderService, optional
+        self.stateless_only = stateless_only
         self.verbose = verbose
         self.last_exception: Exception | None = None
 
@@ -290,8 +307,8 @@ class LabServer(ThreadingHTTPServer):
 
 
 def start_in_thread(service: AnalysisService, host: str = "127.0.0.1", port: int = 0,
-                    reader: Any = None) -> tuple[LabServer, threading.Thread]:
-    server = LabServer((host, port), service, reader=reader)
+                    reader: Any = None, stateless_only: bool = False) -> tuple[LabServer, threading.Thread]:
+    server = LabServer((host, port), service, reader=reader, stateless_only=stateless_only)
     thread = threading.Thread(target=server.serve_forever, name="pronunciation-lab-server", daemon=True)
     thread.start()
     return server, thread
