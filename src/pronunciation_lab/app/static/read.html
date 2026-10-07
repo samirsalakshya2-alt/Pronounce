@@ -11,7 +11,8 @@
   <a class="brand" href="/read">Pronounce</a>
   <span id="top-title" class="top-title"></span>
   <span id="progress" class="progress" hidden></span>
-  <a class="lab-link" href="/">Lab</a>
+  <a id="new-article" class="new-article" href="/read" hidden>← New article</a>
+  <a id="lab-link" class="lab-link" href="/">Lab</a>
 </header>
 
 <!-- Entry: paste an article -------------------------------------------------- -->
@@ -19,8 +20,8 @@
   <h1>Read an article aloud</h1>
   <p class="lede">Paste an article. Click a sentence to start reading it; click the next sentence when you get there.
     Each sentence is recorded and listened to in the background while you keep reading.</p>
-  <section id="practice-now" class="practice-now" hidden><h2>What to practise now</h2><p class="muted small scope">Based on your recent readings</p><div id="practice-now-body"></div></section>
-  <section id="patterns-over-time" class="patterns-over-time" hidden><h2>Your patterns over time</h2><p class="muted small scope">Based on all your readings</p><div id="patterns-over-time-body"></div></section>
+
+  <!-- Article entry comes first so the primary action is immediately available. -->
   <form id="entry-form">
     <input id="entry-title" type="text" placeholder="Title (optional)" maxlength="200" autocomplete="off">
     <input id="entry-source" type="text" placeholder="Source or subtitle (optional)" maxlength="200" autocomplete="off">
@@ -32,7 +33,25 @@
     <button id="entry-start" type="submit" class="primary">Start reading</button>
     <p id="entry-error" class="error" hidden></p>
   </form>
-  <section id="recent" hidden><h2>Continue reading</h2><ul id="recent-list"></ul></section>
+
+  <!-- Longitudinal coaching ------------------------------------------------- -->
+  <section id="practice-now" class="practice-now" hidden>
+    <h2>What to practise now</h2>
+    <p class="muted small scope">Based on your recent readings</p>
+    <div id="practice-now-body"></div>
+  </section>
+
+  <section id="patterns-over-time" class="patterns-over-time" hidden>
+    <h2>Your patterns over time</h2>
+    <p class="muted small scope">Based on all your readings</p>
+    <div id="patterns-over-time-body"></div>
+  </section>
+
+  <!-- Continue reading ------------------------------------------------------ -->
+  <section id="recent" hidden>
+    <h2>Continue reading</h2>
+    <ul id="recent-list"></ul>
+  </section>
 </main>
 
 <!-- Reader --------------------------------------------------------------------- -->
@@ -67,6 +86,10 @@
 <script src="/static/reader-core.js"></script>
 <script src="/static/app.js"></script>
 <script src="/static/reader-feedback.js"></script>
+<script src="/static/browser-store.js"></script>
+<script src="/static/reader-browser-coaching.js"></script>
+<script src="/static/reader-browser-longitudinal.js"></script>
+<script src="/static/reader-browser.js"></script>
 <script src="/static/reader.js"></script>
 </body>
 </html>

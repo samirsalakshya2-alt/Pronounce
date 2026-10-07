@@ -19,14 +19,38 @@ def test_stateless_server_only_exposes_ui_status_health_and_analysis(fake_servic
         assert status == 200
         assert body["benchmark_recordings"] == []
         assert body["notes_enabled"] is False
+        assert body["stateless_only"] is True
+
+        status, _, page = client.request("GET", "/")
+        assert status == 200 and b"Pronounce \xe2\x80\x94 Reader" in page
+        assert b"/static/browser-store.js" in page
+        assert b"/static/reader-browser.js" in page
+
+        status, _, page = client.request("GET", "/read")
+        assert status == 200 and b"Pronounce \xe2\x80\x94 Reader" in page
 
         for path in (
-            "/read", "/static/read.html", "/static/reader.js",
-            "/static/reader-feedback.js",
             "/api/analyses", "/api/sessions",
         ):
             status, data = client.get_json(path)
             assert status == 404 and data["error"]["code"] == "not_found"
+
+        for path in (
+            "/static/read.html", "/static/reader.js", "/static/reader-core.js",
+            "/static/reader-feedback.js", "/static/browser-store.js",
+            "/static/reader-browser.js", "/static/reader-browser-coaching.js",
+            "/static/reader-browser-longitudinal.js", "/static/capture-worklet.js",
+        ):
+            status, _, body = client.request("GET", path)
+            assert status == 200 and body
+
+        for path in (
+            "/static/index.html", "/static/style.css",
+        ):
+            status, data = client.get_json(path)
+            assert status == 404 and data["error"]["code"] == "not_found"
+        status, _, shared_renderer = client.request("GET", "/static/app.js")
+        assert status == 200 and b"createEvidenceRenderers" in shared_renderer
 
         status, _, body = client.request(
             "POST", "/api/analyze", b"",
@@ -40,6 +64,22 @@ def test_stateless_server_only_exposes_ui_status_health_and_analysis(fake_servic
         )
         assert status == 415 and b'"unsupported_media_type"' in body
         assert server.reader is None
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_local_mode_keeps_lab_root_and_reader_route(lab, reader):
+    server, thread = start_in_thread(lab, reader=reader)
+    client = Client(server.url)
+    try:
+        status, _, root = client.request("GET", "/")
+        assert status == 200 and b"Pronunciation Lab" in root
+        status, _, hosted_reader = client.request("GET", "/read")
+        assert status == 200 and b"Pronounce \xe2\x80\x94 Reader" in hosted_reader
+        status, body = client.get_json("/api/status")
+        assert status == 200 and "stateless_only" not in body
     finally:
         server.shutdown()
         server.server_close()

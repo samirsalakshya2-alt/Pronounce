@@ -12,6 +12,7 @@
     status: null, snap: null, rev: null, sessionId: null, segments: [], segById: {},
     segEls: {}, markEls: {}, drawers: {}, controller: null, uploads: null, stream: null, ctx: null, node: null,
     level: 0, arming: false, lastSelected: null, pollTimer: null, localAttempts: {},
+    browser: null, startingAttempts: {},
   };
   window.__reader = S; // read-only hook for browser tests
 
@@ -46,12 +47,37 @@
   async function showEntry() {
     $("entry").hidden = false;
     $("reader").hidden = true;
+    $("new-article").hidden = true;
     const sel = $("entry-engine");
     sel.innerHTML = "";
     for (const e of S.status.engines.filter((x) => x.state === "runnable" && ["wav2vec2_raw", "openpronounce"].includes(x.id))) {
       sel.append(el("option", { value: e.id, text: e.label }));
     }
     sel.value = S.status.default_engine;
+    if (S.browser) {
+      const sessions = await S.browser.sessions();
+      $("recent").hidden = !sessions.length;
+      $("recent-list").innerHTML = "";
+      for (const session of sessions.slice(0, 10)) {
+        $("recent-list").append(el("li", {
+          text: `${session.title} · ${session.attempts} recording${session.attempts === 1 ? "" : "s"}`,
+          onclick: () => { location.search = "?session=" + session.id; },
+        }));
+      }
+      const history = await S.browser.homeState();
+      $("practice-now").hidden = !history.coaching || history.coaching.state === "unavailable";
+      $("practice-now-body").innerHTML = "";
+      if (history.coaching && window.ReaderFeedback) {
+        window.ReaderFeedback.renderCoaching(S, $("practice-now-body"), history.coaching);
+      }
+      if (window.ReaderFeedback) {
+        window.ReaderFeedback.annotateCoaching($("practice-now-body"), history.adaptation);
+        const result = window.ReaderFeedback.renderProgress(S, $("patterns-over-time-body"),
+          history.progress, history.adaptation);
+        $("patterns-over-time").hidden = !result || result.state === "unavailable";
+      }
+      return;
+    }
     try {  // M9: what to practise now, across recent readings (0–3 actions, or why there are none)
       const { coaching } = await api("/api/coaching");
       $("practice-now").hidden = !coaching || coaching.state === "unavailable";
@@ -82,6 +108,13 @@
     $("entry-error").hidden = true;
     $("entry-start").disabled = true;
     try {
+      if (S.browser) {
+        const snap = await S.browser.createSession($("entry-text").value, $("entry-title").value,
+          $("entry-source").value, $("entry-engine").value);
+        history.replaceState(null, "", "/?session=" + snap.session.id);
+        openReader(snap);
+        return;
+      }
       const { article } = await post("/api/articles", { text: $("entry-text").value, title: $("entry-title").value,
         source: $("entry-source").value });
       const sid = uuidHex();
@@ -99,6 +132,10 @@
   // --- reader -------------------------------------------------------------------------------
   async function openSession(sid) {
     try {
+      if (S.browser) {
+        openReader(await S.browser.reopen(sid));
+        return;
+      }
       // A new page: any capture another page left open can no longer finish.
       const snap = await post(`/api/sessions/${sid}/state`, { action: "reopen", run_id: null });
       openReader(snap);
@@ -113,6 +150,7 @@
   function openReader(snap) {
     $("entry").hidden = true;
     $("reader").hidden = false;
+    $("new-article").hidden = false;
     S.sessionId = snap.session.id;
     S.segments = snap.article.segments;
     S.segById = Object.fromEntries(S.segments.map((s) => [s.id, s]));
@@ -148,7 +186,9 @@
       span.addEventListener("click", () => { if (!span.classList.contains("annotated")) onSegment(seg.id); });
       span.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); onSegment(seg.id); } });
       // inline after the sentence: its concise feedback and "Details" (filled once it has been read)
-      const note = el("span", { class: "note", hidden: true, "data-note": seg.id });
+      // Always present in the flow (never hidden) so it reserves its stable layout slot.
+      const note = el("span", { class: "note note-slot", "data-note": seg.id, "data-state": "empty" });
+
       S.segEls[seg.id] = span;
       S.markEls[seg.id] = note;
       para.append(span, note);
@@ -220,6 +260,11 @@
 
   function attemptStarted(a) {
     S.localAttempts[a.attemptId] = a;
+    if (S.browser) {
+      S.startingAttempts[a.attemptId] = S.browser.startAttempt(S.sessionId, a);
+      S.startingAttempts[a.attemptId].catch((error) => notice(error.message));
+      return;
+    }
     post(`/api/sessions/${S.sessionId}/attempts/${a.attemptId}/start`, {
       segment_id: a.segmentId, run_id: a.runId, sample_rate: a.sampleRate, start_sample: a.startSample,
       wall_clock_start: a.wallClockStart,
@@ -238,6 +283,23 @@
 
   async function uploadAttempt(item) {
     const a = item.attempt;
+    if (S.browser) {
+      try {
+        await S.startingAttempts[a.attemptId];
+        const snap = await S.browser.submitAttempt(S.sessionId, a, item.wav);
+        a.status = "UPLOADED";
+        applySnapshot(snap);
+        return { state: "complete" };
+      } catch (error) {
+        a.status = "UPLOAD_FAILED";
+        error.retryable = false;
+        notice("Analysis failed: " + error.message);
+        applySnapshot(await S.browser.snapshot(S.sessionId));
+        throw error;
+      } finally {
+        delete S.startingAttempts[a.attemptId];
+      }
+    }
     const res = await fetch(`/api/sessions/${S.sessionId}/attempts/${a.attemptId}/audio`, {
       method: "POST", headers: { "Content-Type": "audio/wav", "X-Capture": captureHeader(a) }, body: item.wav,
     }).catch((e) => { throw Object.assign(new Error("offline: " + e.message), { retryable: true }); });
@@ -257,6 +319,11 @@
     S.controller.deviceLost();
     releaseMic();
     notice("The microphone stopped. What was recorded so far is kept. Click a sentence to continue.");
+    if (S.browser) {
+      S.browser.action(S.sessionId, "stop").then(applySnapshot).catch((error) => notice(error.message));
+      renderAll();
+      return;
+    }
     post(`/api/sessions/${S.sessionId}/state`, { action: "stop" }).catch(() => {});
     renderAll();
   }
@@ -266,6 +333,11 @@
     const c = S.controller;
     if (c.state === "CAPTURING") {
       c.pause();
+      if (S.browser) {
+        S.browser.action(S.sessionId, "pause").then(applySnapshot).catch((error) => notice(error.message));
+        renderAll();
+        return;
+      }
       post(`/api/sessions/${S.sessionId}/state`, { action: "pause" }).then(applySnapshot).catch(() => {});
     } else if (S.lastSelected) {
       onSegment(S.lastSelected); // RESUME: a new attempt of the sentence that was active
@@ -282,13 +354,45 @@
 
   function stopReading() {
     stop("stopped");
+    if (S.browser) {
+      S.browser.action(S.sessionId, "stop").then(applySnapshot).catch((error) => notice(error.message));
+      return;
+    }
     post(`/api/sessions/${S.sessionId}/state`, { action: "stop" }).then(applySnapshot).catch(() => {});
   }
 
   function finishReading() {
     stop("finished");
+    if (S.browser) {
+      S.browser.action(S.sessionId, "finish").then(applySnapshot).catch((error) => notice(error.message));
+      return;
+    }
     post(`/api/sessions/${S.sessionId}/state`, { action: "finish" }).then(applySnapshot).catch((e) => notice(e.message));
   }
+
+  function newArticle(ev) {
+    ev.preventDefault();
+
+    if (S.controller) {
+      stop("new_article");
+    }
+
+    history.replaceState(null, "", "/read");
+    showEntry();
+  }
+
+  function newArticle(ev) {
+  ev.preventDefault();
+
+  if (S.controller && S.controller.state === "CAPTURING") {
+    stop("new_article");
+  } else if (S.controller && S.controller.state === "ARMED") {
+    stop("new_article");
+  }
+
+  history.replaceState(null, "", "/read");
+  showEntry();
+}
 
   function step(delta) {
     const readable = S.segments.filter((s) => s.readable);
@@ -304,6 +408,7 @@
   }
 
   async function poll() {
+    if (S.browser) return;
     try {
       const snap = await api(`/api/sessions/${S.sessionId}` + (S.rev !== null ? `?since=${S.rev}` : ""));
       if (!snap.unchanged) applySnapshot(snap);
@@ -404,6 +509,11 @@
     /** M9 retest: the action's sentences become a short practice article, read through the normal reader. */
     async startPractice(sentences, title, targetId) {
       try {
+        if (S.browser) {
+          const snap = await S.browser.createPractice(sentences, title, targetId, S.sessionId);
+          location.href = "/?session=" + snap.session.id;
+          return;
+        }
         const engine = (S.snap && S.snap.session && S.snap.session.engine_default) || (S.status && S.status.default_engine);
         const { article } = await post("/api/articles", { text: sentences.join("\n\n"),
           title: ("Practice: " + (title || "")).slice(0, 200), source: "What to practise now" });
@@ -416,10 +526,18 @@
     },
     readAgain(segId) { onSegment(segId); },
     retry(a, job) {
+      if (S.browser) {
+        S.browser.retry(S.sessionId, a.id).then(applySnapshot).catch((error) => notice(error.message));
+        return;
+      }
       post(`/api/sessions/${S.sessionId}/attempts/${a.id}/jobs/${job.id}/retry`, {})
         .then(() => schedulePoll(200)).catch((e) => notice(e.message));
     },
     disposition(a, value) {
+      if (S.browser) {
+        return S.browser.disposition(S.sessionId, a.id, value).then(applySnapshot)
+          .catch((error) => notice(error.message));
+      }
       return post(`/api/sessions/${S.sessionId}/attempts/${a.id}/disposition`, { value })
         .then(() => schedulePoll(50)).catch((e) => notice(e.message));
     },
@@ -429,6 +547,38 @@
       onSegment(segId); // a new recording of the same sentence; the old one stays in the history // a new attempt of the same sentence; the old one stays in the history
     },
     async compare(a, box, btn, R) {
+      if (S.browser) {
+        btn.disabled = true;
+        box.innerHTML = "";
+        try {
+          const entries = await S.browser.comparison(S.sessionId, a.id);
+          for (const entry of entries) {
+            const section = el("section", { class: "engine-comparison", "data-engine": entry.engine }, [
+              el("h4", { text: entry.label }),
+              el("p", { class: "muted small", text: entry.state === "SUCCEEDED"
+                ? `Identity: ${entry.identity || "not available"} · Boundary: ${entry.boundary || "not checked"}`
+                : (entry.error || "This engine could not complete the analysis.") }),
+            ]);
+            if (entry.state === "SUCCEEDED") {
+              for (const pattern of entry.view?.coach?.patterns || []) {
+                section.append(el("p", { class: "small", text: pattern.summary }));
+              }
+              for (const candidate of entry.view?.reduction?.candidates || []) {
+                section.append(el("p", { class: "small", text:
+                  `${candidate.interpretation.label}: ${candidate.expected}` }));
+              }
+            }
+            box.append(section);
+          }
+          box.append(el("p", { class: "muted small", text:
+            "The engines' evidence is shown separately; they share an acoustic model, so agreement is not independent confirmation." }));
+        } catch (error) {
+          box.append(el("p", { class: "error", text: "Comparison failed: " + error.message }));
+        } finally {
+          btn.disabled = false;
+        }
+        return;
+      }
       btn.disabled = true;
       box.innerHTML = "";
       box.append(el("p", { class: "muted small", text: "Listening with the other model…" }));
@@ -461,6 +611,7 @@
   // --- wiring -----------------------------------------------------------------------------------------
   $("entry-form").addEventListener("submit", startFromEntry);
   $("pause-btn").addEventListener("click", pauseOrResume);
+  $("new-article").addEventListener("click", newArticle);
   $("stop-btn").addEventListener("click", stopReading);
   $("finish-btn").addEventListener("click", finishReading);
   document.addEventListener("keydown", (e) => {
@@ -473,7 +624,11 @@
   document.addEventListener("visibilitychange", () => {
     if (document.hidden && S.controller && S.controller.state === "CAPTURING") {
       S.controller.finalizeCurrent("page_hidden");
-      post(`/api/sessions/${S.sessionId}/state`, { action: "pause" }).catch(() => {});
+      if (S.browser) {
+        S.browser.action(S.sessionId, "pause").then(applySnapshot).catch((error) => notice(error.message));
+      } else {
+        post(`/api/sessions/${S.sessionId}/state`, { action: "pause" }).catch(() => {});
+      }
       notice("Paused because the page was hidden. Click a sentence to continue.");
       renderAll();
     }
@@ -486,6 +641,13 @@
 
   (async () => {
     S.status = await api("/api/status");
+    if (S.status.stateless_only) {
+      S.browser = await window.PronounceReaderBrowser.BrowserReader.open(S.status);
+      $("lab-link").hidden = true;
+      const sid = new URLSearchParams(location.search).get("session");
+      if (sid) await openSession(sid); else await showEntry();
+      return;
+    }
     const sid = new URLSearchParams(location.search).get("session");
     if (sid) await openSession(sid); else await showEntry();
   })().catch((e) => notice("Could not reach the app: " + e.message));

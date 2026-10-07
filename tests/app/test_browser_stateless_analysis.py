@@ -51,10 +51,10 @@ def test_browser_analysis_persists_original_audio_and_independent_engine_results
 
     original_stateless = server.service.analyze_stateless
 
-    def fail_transport(data, filename, text):
+    def fail_transport(data, filename, text, article_sentences=None):
         if text == "Transport request failure.":
             raise UserError("server_error", "The analysis service could not complete this request.", 503)
-        return original_stateless(data, filename, text)
+        return original_stateless(data, filename, text, article_sentences)
 
     monkeypatch.setattr(server.service, "analyze_stateless", fail_transport)
     result = subprocess.run(

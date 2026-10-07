@@ -43,13 +43,14 @@ STATIC_FILES = {"index.html", "app.js", "style.css",
                 # M12 reader
                 "read.html", "reader.js", "reader.css", "reader-core.js", "reader-feedback.js", "capture-worklet.js",
                 # M13 browser-local structured persistence
-                "browser-store.js"}
+                "browser-store.js", "reader-browser.js", "reader-browser-coaching.js",
+                "reader-browser-longitudinal.js"}
 MAX_JSON_BYTES = 64 * 1024
 MAX_MULTIPART_OVERHEAD_BYTES = 64 * 1024
 _ANALYSIS_RE = re.compile(r"^/api/analyses/([^/]+)(/audio|/notes)?$")
 
 
-def _stateless_upload(content_type: str, body: bytes) -> tuple[str, bytes, str]:
+def _stateless_upload(content_type: str, body: bytes) -> tuple[str, bytes, str, list[str]]:
     """Decode the exact multipart fields accepted by the stateless analysis endpoint."""
     try:
         content_type_header = content_type.encode("ascii")
@@ -70,7 +71,7 @@ def _stateless_upload(content_type: str, body: bytes) -> tuple[str, bytes, str]:
             if part.get_content_disposition() != "form-data":
                 raise UserError("bad_multipart", "The multipart form contains an invalid field.")
             name = part.get_param("name", header="content-disposition")
-            if name not in ("audio", "target_text") or name in parts:
+            if name not in ("audio", "target_text", "article_sentences") or name in parts:
                 raise UserError("bad_multipart", "The multipart form contains an invalid or duplicate field.")
             payload = part.get_payload(decode=True)
             if not isinstance(payload, bytes):
@@ -95,10 +96,28 @@ def _stateless_upload(content_type: str, body: bytes) -> tuple[str, bytes, str]:
     except UnicodeDecodeError:
         raise UserError("bad_multipart", "The target_text field must be UTF-8 text.") from None
 
+    article_sentences: list[str] = []
+    if "article_sentences" in parts:
+        context_part, context_bytes = parts["article_sentences"]
+        context_charset = context_part.get_content_charset()
+        if context_charset and context_charset.lower().replace("_", "-") not in ("utf-8", "utf8"):
+            raise UserError("bad_multipart", "The article_sentences field must be UTF-8 JSON.")
+        try:
+            decoded_context = json.loads(context_bytes.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            raise UserError("bad_multipart", "The article_sentences field must be UTF-8 JSON.") from None
+        if (
+            not isinstance(decoded_context, list)
+            or len(decoded_context) > 6
+            or any(not isinstance(item, str) or len(item) > 300 for item in decoded_context)
+        ):
+            raise UserError("bad_multipart", "The article_sentences field must contain at most six sentences.")
+        article_sentences = decoded_context
+
     audio_part, audio = parts["audio"]
     filename = audio_part.get_filename() or "upload.bin"
     filename = filename.replace("\\", "/").rsplit("/", 1)[-1] or "upload.bin"
-    return target_text, audio, filename
+    return target_text, audio, filename, article_sentences
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -186,17 +205,20 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/healthz":
             return self._json(200, {"status": "ok"})
         if self.server.stateless_only and not (
-            path in ("/", "/index.html", "/api/status") or path.startswith("/static/")
+            path in ("/", "/read", "/read/", "/api/status") or path.startswith("/static/")
         ):
             raise UserError("not_found", "Not found.", 404)
         if path in ("/", "/index.html"):
-            return self._static("index.html")
+            return self._static("read.html" if self.server.stateless_only else "index.html")
         if path in ("/read", "/read/"):
             return self._static("read.html")
         if path.startswith("/static/"):
             return self._static(path[len("/static/"):])
         if path == "/api/status":
-            return self._json(200, service.status())
+            status = service.status()
+            if self.server.stateless_only:
+                status["stateless_only"] = True
+            return self._json(200, status)
         if path == "/api/analyses":
             return self._json(200, {"analyses": service.recent()})
 
@@ -216,10 +238,11 @@ class Handler(BaseHTTPRequestHandler):
         raise UserError("not_found", "Not found.", 404)
 
     def _static(self, name: str) -> None:
-        if self.server.stateless_only and name in {
-            "read.html", "reader.js", "reader.css", "reader-core.js",
-            "reader-feedback.js", "capture-worklet.js",
-    }:
+        if self.server.stateless_only and name not in {
+            "read.html", "reader.js", "reader.css", "reader-core.js", "reader-feedback.js",
+            "capture-worklet.js", "browser-store.js", "reader-browser.js",
+            "reader-browser-coaching.js", "reader-browser-longitudinal.js", "app.js",
+        }:
             raise UserError("not_found", "Not found.", 404)
         if name not in STATIC_FILES:
             raise UserError("not_found", "Not found.", 404)
@@ -243,11 +266,11 @@ class Handler(BaseHTTPRequestHandler):
             if not content_type.lower().startswith("multipart/form-data"):
                 raise UserError("unsupported_media_type", "Use multipart/form-data for this request.", 415)
             body = self._body(MAX_UPLOAD_BYTES + MAX_MULTIPART_OVERHEAD_BYTES)
-            text, audio, filename = _stateless_upload(content_type, body)
+            text, audio, filename, article_sentences = _stateless_upload(content_type, body)
             if len(audio) > MAX_UPLOAD_BYTES:
                 size_mb = MAX_UPLOAD_BYTES // (1024 * 1024) or 1
                 raise UserError("payload_too_large", f"The audio file is larger than {size_mb} MB.", 413)
-            return self._json(200, service.analyze_stateless(audio, filename, text))
+            return self._json(200, service.analyze_stateless(audio, filename, text, article_sentences))
 
         if url.path == "/api/analyze":
             data = self._body(MAX_UPLOAD_BYTES)

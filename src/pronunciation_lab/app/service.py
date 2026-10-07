@@ -39,12 +39,25 @@ from pronunciation_lab.app.pipeline import analyze_pipeline
 from pronunciation_lab.benchmark.base import PronunciationEngine
 from pronunciation_lab.benchmark.engines import ENGINES, create_engine
 from pronunciation_lab.benchmark.runner import classify_engine
+from pronunciation_lab.reader.stateless import analyze_reader_view
 
 DEFAULT_ENGINE = "wav2vec2_raw"
 MAX_TEXT_CHARS = 300
 _ID_RE = re.compile(r"^[0-9a-f]{32}$")
 WORKSPACE_PREFIX = "pronunciation-lab-"
 _WORKSPACE_RE = re.compile(rf"^{WORKSPACE_PREFIX}(\d+)-")
+
+
+def _sanitize_failure_details(value: Any) -> None:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key in {"message", "detail"} and isinstance(item, str):
+                value[key] = "The engine could not complete this analysis."
+            else:
+                _sanitize_failure_details(item)
+    elif isinstance(value, list):
+        for item in value:
+            _sanitize_failure_details(item)
 
 
 def _pid_alive(pid: int) -> bool:
@@ -253,7 +266,9 @@ class AnalysisService:
         eid, engine = self._engine(engine_id)
         return self._run(data, filename, text, eid, engine, source_label=f"upload: {Path(filename or 'upload').name}")
 
-    def analyze_stateless(self, data: bytes, filename: str, text: str | None) -> dict[str, Any]:
+    def analyze_stateless(
+        self, data: bytes, filename: str, text: str | None, article_sentences: list[str] | None = None
+    ) -> dict[str, Any]:
         """Analyze one upload with both local engines without retaining request data."""
         text = validate_text(text)
         request_id = uuid.uuid4().hex
@@ -291,15 +306,37 @@ class AnalysisService:
                     result_data["recording"]["audio"].pop("original_path", None)
                     result_data["recording"]["audio"].pop("analysis_path", None)
                     if result.status in ("failed", "blocked"):
-                        for error in result_data.get("errors", []):
-                            error["message"] = "The engine could not complete this analysis."
-                        if evidence.get("error"):
-                            evidence["error"]["detail"] = "The engine could not complete this analysis."
+                        _sanitize_failure_details(result_data)
+                        _sanitize_failure_details(evidence)
                     analyses[engine_id] = {
                         "state": result.status,
                         "result": result_data,
                         "evidence": evidence,
                     }
+                    try:
+                        reader = analyze_reader_view(
+                            engine,
+                            result,
+                            json.loads(json.dumps(evidence)),
+                            audio.analysis_path,
+                            text,
+                            article_sentences or [],
+                            self._lock,
+                        )
+                        if result.status in ("failed", "blocked"):
+                            _sanitize_failure_details(reader)
+                        for item in (reader["result"], reader["full_recording"]["result"]):
+                            item.get("recording", {}).get("audio", {}).pop("original_path", None)
+                            item.get("recording", {}).get("audio", {}).pop("analysis_path", None)
+                        analyses[engine_id]["reader"] = reader
+                    except Exception:  # noqa: BLE001 - Reader-domain failure stays isolated from engine evidence
+                        analyses[engine_id]["reader"] = {
+                            "state": "failed",
+                            "error": {
+                                "code": "reader_analysis_failed",
+                                "message": "Sentence boundary or identity analysis could not be completed.",
+                            },
+                        }
                 except Exception:  # noqa: BLE001 - each engine is an independent analysis
                     analyses[engine_id] = {
                         "state": "failed",
